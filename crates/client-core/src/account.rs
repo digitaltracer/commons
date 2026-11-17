@@ -4,8 +4,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use proto::api::{MemberList, MessagePage, WorkspaceList};
-use proto::events::{ClientFrame, ServerFrame, StreamCursor, WorkspaceEvent, WorkspaceReplay};
+use proto::api::{MemberList, MessagePage};
+use proto::events::{
+    ClientFrame, ServerFrame, StreamCursor, UserEvent, UserEventBody, UserReplay, UserSnapshot,
+    WorkspaceEvent, WorkspaceReplay,
+};
 use proto::model::{Message, Notification, User};
 use proto::view::{AccountView, ConnectionState, DraftReason, DraftView, MessageView};
 use proto::window::WindowSpec;
@@ -269,43 +272,146 @@ impl Account {
         Ok(())
     }
 
-    /// Learns the workspaces this account belongs to.
-    pub async fn refresh_workspaces(&self) -> Result<(), SyncError> {
-        let list: WorkspaceList = self
-            .api(Method::Get, "/workspaces", &[], None::<&()>, None)
-            .await?;
-        let known: HashSet<Uuid> = self.store.workspaces()?.iter().map(|(w, _)| w.id).collect();
-        for w in list.workspaces {
-            if known.contains(&w.id) {
-                continue;
+    /// Replays the user's own stream: workspace joins and removals, read cursors,
+    /// preferences and notifications.
+    pub async fn catch_up_user(&self) -> Result<(), SyncError> {
+        loop {
+            let since = self.store.user_since()?;
+            let page: UserReplay = self
+                .api(
+                    Method::Get,
+                    "/sync/user",
+                    &[("since", since.to_string())],
+                    None::<&()>,
+                    None,
+                )
+                .await?;
+            let added = match &page.snapshot {
+                Some(snapshot) => self.apply_user_snapshot(snapshot)?,
+                None => self.apply_user_page(&page.events, page.next_since)?,
+            };
+            for w in added {
+                self.fetch_members(w).await?;
             }
-            self.add_workspace(w, 0).await?;
+            if page.snapshot.is_none() && page.next_since >= page.head {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
-    async fn add_workspace(
+    /// Applies user events and advances the user cursor in one commit. Returns the
+    /// workspaces that were added, whose member lists still need fetching.
+    fn apply_user_page(
         &self,
-        workspace: proto::model::Workspace,
-        since: i64,
-    ) -> Result<(), SyncError> {
-        let members: MemberList = self
+        events: &[UserEvent],
+        next_since: i64,
+    ) -> Result<Vec<Uuid>, SyncError> {
+        let _guard = self.apply_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let since = self.store.user_since()?;
+        // Membership as of each event in the page: a removal and a re-join can share a page.
+        let mut present: HashSet<Uuid> =
+            self.store.workspaces()?.iter().map(|(w, _)| w.id).collect();
+        let mut ops = vec![];
+        let mut added = vec![];
+        let mut notifications = vec![];
+        for ev in events.iter().filter(|e| e.seq > since) {
+            match &ev.body {
+                UserEventBody::WorkspaceJoined {
+                    workspace,
+                    start_seq,
+                } => {
+                    if present.insert(workspace.id) {
+                        added.push(workspace.id);
+                        ops.push(Op::AddWorkspace {
+                            workspace: workspace.clone(),
+                            since: (start_seq - 1).max(0),
+                        });
+                    }
+                }
+                UserEventBody::WorkspaceRemoved { workspace_id } => {
+                    present.remove(workspace_id);
+                    added.retain(|w| w != workspace_id);
+                    ops.push(Op::RemoveWorkspace(*workspace_id));
+                }
+                UserEventBody::ReadCursor {
+                    conversation_id,
+                    seq,
+                    ..
+                } => ops.push(Op::SetReadCursor {
+                    conversation_id: *conversation_id,
+                    seq: *seq,
+                }),
+                UserEventBody::PreferencesChanged { preferences } => ops.push(Op::SetMeta(
+                    "preferences".into(),
+                    serde_json::to_string(preferences).map_err(anyhow::Error::from)?,
+                )),
+                UserEventBody::Notify { notification } => notifications.push(notification.clone()),
+            }
+        }
+        ops.push(Op::SetUserSince(next_since.max(since)));
+        self.commit(ops)?;
+        for n in notifications {
+            crate::account::present(self, &n);
+        }
+        Ok(added)
+    }
+
+    fn apply_user_snapshot(&self, snapshot: &UserSnapshot) -> Result<Vec<Uuid>, SyncError> {
+        let _guard = self.apply_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let known: HashSet<Uuid> = self.store.workspaces()?.iter().map(|(w, _)| w.id).collect();
+        let current: HashSet<Uuid> = snapshot.workspaces.iter().map(|(w, _)| w.id).collect();
+        let mut ops: Vec<Op> = known
+            .difference(&current)
+            .map(|w| Op::RemoveWorkspace(*w))
+            .collect();
+        let mut added = vec![];
+        for (w, resume) in &snapshot.workspaces {
+            if !known.contains(&w.id) {
+                added.push(w.id);
+                ops.push(Op::AddWorkspace {
+                    workspace: w.clone(),
+                    since: *resume,
+                });
+            }
+        }
+        for c in &snapshot.read_cursors {
+            ops.push(Op::SetReadCursor {
+                conversation_id: c.conversation_id,
+                seq: c.seq,
+            });
+        }
+        ops.push(Op::SetMeta(
+            "preferences".into(),
+            serde_json::to_string(&snapshot.preferences).map_err(anyhow::Error::from)?,
+        ));
+        ops.push(Op::SetUserSince(snapshot.seq));
+        self.commit(ops)?;
+        Ok(added)
+    }
+
+    async fn fetch_members(&self, workspace_id: Uuid) -> Result<(), SyncError> {
+        let members: MemberList = match self
             .api(
                 Method::Get,
-                &format!("/workspaces/{}/members", workspace.id),
+                &format!("/workspaces/{workspace_id}/members"),
                 &[],
                 None::<&()>,
                 None,
             )
-            .await?;
-        let mut ops = vec![Op::AddWorkspace { workspace, since }];
-        ops.extend(apply::members(members.members));
-        self.commit(ops)?;
+            .await
+        {
+            Ok(m) => m,
+            Err(SyncError::Transport(e)) if e.status() == Some(403) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        self.commit(apply::members(members.members))?;
         Ok(())
     }
 
-    /// Applies one replay page (or socket frame) and advances the cursor in the same commit.
-    fn apply_workspace_page(
+    /// Applies one replay page (or socket frame). Each event commits together with the cursor
+    /// advance past it, so each decision sees the state the previous event left, and a pending
+    /// backfill is never written without its cursor (or the cursor without the backfill).
+    pub fn apply_workspace_page(
         &self,
         workspace_id: Uuid,
         events: &[WorkspaceEvent],
@@ -318,32 +424,39 @@ impl Account {
             .into_iter()
             .find(|(w, _)| w.id == workspace_id)
             .map(|(_, s)| s);
-        let Some(since) = since else { return Ok(()) };
-        let mut ops = vec![];
+        let Some(mut since) = since else {
+            return Ok(());
+        };
         let mut grants = false;
-        for ev in events.iter().filter(|e| e.seq > since) {
+        for ev in events {
+            if ev.seq <= since {
+                continue;
+            }
             #[cfg(feature = "testing")]
             if let Ok(mut r) = self.received.lock() {
                 r.push((workspace_id, ev.clone()));
             }
-            let mut event_ops =
-                apply::workspace_event(&*self.store, self.user.id, workspace_id, ev)?;
-            grants |= event_ops.iter().any(|o| matches!(o, Op::AddBackfill(_)));
-            ops.append(&mut event_ops);
+            let mut ops = apply::workspace_event(&*self.store, self.user.id, workspace_id, ev)?;
+            let grant = ops.iter().any(|o| matches!(o, Op::AddBackfill(_)));
+            #[cfg(feature = "testing")]
+            if grant
+                && self
+                    .faults
+                    .crash_before_grant_commit
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(SyncError::Other(anyhow::anyhow!(
+                    "injected crash before grant commit"
+                )));
+            }
+            ops.push(Op::SetWorkspaceSince(workspace_id, ev.seq));
+            self.commit(ops)?;
+            since = ev.seq;
+            grants |= grant;
         }
-        #[cfg(feature = "testing")]
-        if grants
-            && self
-                .faults
-                .crash_before_grant_commit
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(SyncError::Other(anyhow::anyhow!(
-                "injected crash before grant commit"
-            )));
+        if next_since > since {
+            self.commit(vec![Op::SetWorkspaceSince(workspace_id, next_since)])?;
         }
-        ops.push(Op::SetWorkspaceSince(workspace_id, next_since.max(since)));
-        self.commit(ops)?;
         if grants {
             self.wake_backfill.notify_one();
         }
@@ -372,7 +485,7 @@ impl Account {
             {
                 Ok(p) => p,
                 Err(SyncError::Transport(e)) if e.status() == Some(403) => {
-                    // No longer a member; the user stream (step 2) drives the purge.
+                    // No longer a member; the user stream's workspace_removed drives the purge.
                     return Ok(());
                 }
                 Err(e) => return Err(e),
@@ -392,7 +505,7 @@ impl Account {
 
     /// One full HTTPS sync: workspaces, every stream, then pending backfills.
     pub async fn sync_once(&self) -> Result<(), SyncError> {
-        self.refresh_workspaces().await?;
+        self.catch_up_user().await?;
         for (w, _) in self.store.workspaces()? {
             self.catch_up_workspace(w.id).await?;
         }
@@ -500,10 +613,15 @@ impl Account {
             } => {
                 self.apply_workspace_page(workspace_id, &events, next_since)?;
             }
-            ServerFrame::User { .. } => {}
+            ServerFrame::User { events, next_since } => {
+                for w in self.apply_user_page(&events, next_since)? {
+                    self.fetch_members(w).await?;
+                }
+            }
             ServerFrame::Resync { workspace_id } => {
-                if let Some(w) = workspace_id {
-                    self.catch_up_workspace(w).await?;
+                match workspace_id {
+                    Some(w) => self.catch_up_workspace(w).await?,
+                    None => self.catch_up_user().await?,
                 }
                 // Reconnect so the socket resumes from the new cursors.
                 return Ok(false);
@@ -617,7 +735,7 @@ impl Account {
             self.set_connection(ConnectionState::Connecting);
             let result = async {
                 self.check_version().await?;
-                self.refresh_workspaces().await?;
+                self.catch_up_user().await?;
                 for (w, _) in self.store.workspaces()? {
                     self.catch_up_workspace(w.id).await?;
                 }
@@ -966,3 +1084,6 @@ fn mentions(
 ) -> anyhow::Result<Vec<proto::model::Entity>> {
     Ok(vec![])
 }
+
+/// Notifications arrive in step 3.
+fn present(_account: &Account, _n: &Notification) {}
