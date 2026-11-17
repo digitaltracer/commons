@@ -8,7 +8,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use proto::events::{ClientFrame, ServerFrame};
+use proto::events::{ClientFrame, ServerFrame, UserEventBody};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
@@ -280,8 +280,68 @@ async fn run(state: AppState, user_id: Uuid, socket: WebSocket) {
     }
 }
 
-/// The per-user stream arrives in step 2.
-async fn drain_user_stream(_session: &mut Session) -> Result<(), Stop> {
-    let _ = _session.user_since;
-    Ok(())
+/// Delivers the user's own stream and follows workspace joins and removals.
+async fn drain_user_stream(session: &mut Session) -> Result<(), Stop> {
+    loop {
+        let since = session.user_since;
+        let page = async {
+            let mut tx = session.state.pool.begin().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *tx)
+                .await?;
+            let p = sync::read_user_page(&mut tx, session.user_id, Some(since), PAGE).await?;
+            tx.commit().await?;
+            Ok::<_, ApiError>(p)
+        }
+        .await;
+        let page = match page {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = ?e, "user replay failed");
+                return Err(Stop::Disconnect);
+            }
+        };
+        if page.snapshot.is_some() {
+            session
+                .send(&ServerFrame::Resync { workspace_id: None })
+                .await?;
+            return Err(Stop::Disconnect);
+        }
+        if page.next_since == since {
+            return Ok(());
+        }
+        let mut joined = vec![];
+        for e in &page.events {
+            match &e.body {
+                UserEventBody::WorkspaceJoined {
+                    workspace,
+                    start_seq,
+                } => {
+                    session
+                        .workspaces
+                        .entry(workspace.id)
+                        .or_insert((start_seq - 1).max(0));
+                    joined.push(workspace.id);
+                }
+                UserEventBody::WorkspaceRemoved { workspace_id } => {
+                    session.workspaces.remove(workspace_id);
+                }
+                _ => {}
+            }
+        }
+        let caught_up = page.next_since >= page.head;
+        session
+            .send(&ServerFrame::User {
+                events: page.events,
+                next_since: page.next_since,
+            })
+            .await?;
+        session.user_since = page.next_since;
+        for w in joined {
+            session.drain_workspace(w).await?;
+        }
+        if caught_up {
+            return Ok(());
+        }
+    }
 }

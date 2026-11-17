@@ -2,10 +2,11 @@
 use crate::sqlx;
 use crate::sqlx::{PgConnection, Row};
 use axum::extract::{Path, State};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use proto::api::ConversationList;
+use proto::api::{AddConversationMember, ConversationList, CreateChannel, OpenDm};
 use proto::events::{AccessVia, WorkspaceEventBody};
+use proto::model::Role;
 use proto::model::{Conversation, ConversationKind};
 use uuid::Uuid;
 
@@ -15,7 +16,20 @@ use crate::error::{ApiError, ApiResult};
 use crate::sync::{self, NewEvent};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/workspaces/{id}/conversations", get(list_mine))
+    Router::new()
+        .route("/workspaces/{id}/conversations", get(list_mine))
+        .route(
+            "/workspaces/{id}/channels",
+            get(browse).post(create_channel),
+        )
+        .route("/workspaces/{id}/dms", post(open_dm))
+        .route("/conversations/{id}/join", post(join))
+        .route("/conversations/{id}/leave", post(leave))
+        .route("/conversations/{id}/members", post(add_member))
+        .route(
+            "/conversations/{id}/members/{user_id}",
+            delete(remove_member),
+        )
 }
 
 pub fn via_str(v: AccessVia) -> &'static str {
@@ -94,23 +108,6 @@ pub async fn can_read_now(conn: &mut PgConnection, conversation_id: Uuid, user_i
     .unwrap_or(false)
 }
 
-async fn has_open(
-    conn: &mut PgConnection,
-    conversation_id: Uuid,
-    user_id: Uuid,
-    except: Option<&'static str>,
-) -> ApiResult<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM access_intervals WHERE conversation_id = $1
-           AND user_id = $2 AND left_seq IS NULL AND ($3::text IS NULL OR via <> $3))",
-    )
-    .bind(conversation_id)
-    .bind(user_id)
-    .bind(except)
-    .fetch_one(&mut *conn)
-    .await?)
-}
-
 /// Opens an access interval. Returns the `member_added` event, or `None` if one was open.
 /// The event's seq becomes the interval's `joined_seq` when it is appended.
 pub async fn grant(
@@ -143,24 +140,26 @@ pub async fn grant(
 }
 
 /// Closes the open interval for `via`. `has_access` reports whether another interval remains.
+/// Every open interval for the pair is locked first, so two concurrent revocations agree.
 pub async fn revoke(
     conn: &mut PgConnection,
     conversation_id: Uuid,
     user_id: Uuid,
     via: AccessVia,
 ) -> ApiResult<Option<NewEvent>> {
-    let via_s = via_str(via);
-    let id: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM access_intervals WHERE conversation_id = $1 AND user_id = $2
-           AND via = $3 AND left_seq IS NULL FOR UPDATE",
+    let open: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, via FROM access_intervals WHERE conversation_id = $1 AND user_id = $2
+           AND left_seq IS NULL ORDER BY id FOR UPDATE",
     )
     .bind(conversation_id)
     .bind(user_id)
-    .bind(via_s)
-    .fetch_optional(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
-    let Some(id) = id else { return Ok(None) };
-    let has_access = has_open(conn, conversation_id, user_id, Some(via_s)).await?;
+    let via_s = via_str(via);
+    let Some((id, _)) = open.iter().find(|(_, v)| v == via_s) else {
+        return Ok(None);
+    };
+    let has_access = open.iter().any(|(_, v)| v != via_s);
     Ok(Some(
         NewEvent::conversation(WorkspaceEventBody::MemberRemoved {
             conversation_id,
@@ -169,8 +168,44 @@ pub async fn revoke(
             has_access,
         })
         .about(user_id)
-        .interval(id),
+        .interval(*id),
     ))
+}
+
+/// Closes every interval `user` holds in a workspace (removal from the workspace).
+pub async fn revoke_all(
+    conn: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> ApiResult<Vec<NewEvent>> {
+    let open: Vec<(i64, Uuid, String)> = sqlx::query_as(
+        "SELECT ai.id, ai.conversation_id, ai.via FROM access_intervals ai
+           JOIN conversations c ON c.id = ai.conversation_id
+          WHERE c.workspace_id = $1 AND ai.user_id = $2 AND ai.left_seq IS NULL
+          ORDER BY ai.id FOR UPDATE OF ai",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(open
+        .into_iter()
+        .map(|(id, conversation_id, via)| {
+            let via = if via == "role" {
+                AccessVia::Role
+            } else {
+                AccessVia::Membership
+            };
+            NewEvent::conversation(WorkspaceEventBody::MemberRemoved {
+                conversation_id,
+                user_id,
+                via,
+                has_access: false,
+            })
+            .about(user_id)
+            .interval(id)
+        })
+        .collect())
 }
 
 pub async fn create(
@@ -219,4 +254,271 @@ pub async fn list_mine(
     }
     let conversations = readable(&mut conn, workspace_id, auth.user_id).await?;
     Ok(Json(ConversationList { conversations }))
+}
+
+async fn workspace_of(conn: &mut PgConnection, conversation_id: Uuid) -> ApiResult<Uuid> {
+    sqlx::query_scalar("SELECT workspace_id FROM conversations WHERE id = $1")
+        .bind(conversation_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+async fn role_in(conn: &mut PgConnection, workspace_id: Uuid, user_id: Uuid) -> ApiResult<Role> {
+    sync::active_role(conn, workspace_id, user_id)
+        .await?
+        .ok_or(ApiError::Forbidden)
+}
+
+fn check_channel_name(name: &str) -> ApiResult<String> {
+    let n = name.trim().trim_start_matches('#').to_lowercase();
+    let ok = !n.is_empty()
+        && n.len() <= 80
+        && n.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        return Err(ApiError::BadRequest(
+            "channel names use letters, digits, - and _".into(),
+        ));
+    }
+    Ok(n)
+}
+
+/// Creates a public or private channel; the creator joins it. Owners and admins get
+/// role-derived access to a private channel in the same transaction.
+#[utoipa::path(post, path = "/v1/workspaces/{id}/channels", params(("id" = Uuid, Path)),
+    request_body = CreateChannel, responses((status = 200, body = Conversation)))]
+pub async fn create_channel(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+    Json(req): Json<CreateChannel>,
+) -> ApiResult<Json<Conversation>> {
+    if !matches!(
+        req.kind,
+        ConversationKind::Public | ConversationKind::Private
+    ) {
+        return Err(ApiError::BadRequest("use the DM endpoint for DMs".into()));
+    }
+    let name = check_channel_name(&req.name)?;
+    let mut tx = state.pool.begin().await?;
+    if role_in(&mut tx, workspace_id, auth.user_id).await? == Role::Guest {
+        return Err(ApiError::Forbidden);
+    }
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM conversations WHERE workspace_id = $1 AND name = $2)",
+    )
+    .bind(workspace_id)
+    .bind(&name)
+    .fetch_one(&mut *tx)
+    .await?;
+    if taken {
+        return Err(ApiError::Conflict(serde_json::json!({
+            "error": "name_taken", "message": "a channel with this name exists"
+        })));
+    }
+    let c = create(&mut tx, workspace_id, req.kind, Some(&name), None, false).await?;
+    let mut events = vec![];
+    if c.kind == ConversationKind::Public {
+        events.push(NewEvent::workspace(
+            WorkspaceEventBody::ConversationCreated {
+                conversation: c.clone(),
+            },
+        ));
+    }
+    events.extend(grant(&mut tx, &c, auth.user_id, AccessVia::Membership).await?);
+    if c.kind == ConversationKind::Private {
+        let admins: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT user_id FROM workspace_members WHERE workspace_id = $1
+               AND left_seq IS NULL AND role IN ('owner', 'admin')",
+        )
+        .bind(workspace_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for a in admins {
+            events.extend(grant(&mut tx, &c, a, AccessVia::Role).await?);
+        }
+    }
+    sync::append(&mut tx, workspace_id, events).await?;
+    tx.commit().await?;
+    Ok(Json(c))
+}
+
+/// Channels the caller can see: every public channel (except for guests) and the private
+/// channels they can read.
+#[utoipa::path(get, path = "/v1/workspaces/{id}/channels", params(("id" = Uuid, Path)),
+    responses((status = 200, body = ConversationList)))]
+pub async fn browse(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+) -> ApiResult<Json<ConversationList>> {
+    let mut conn = state.pool.acquire().await?;
+    let role = role_in(&mut conn, workspace_id, auth.user_id).await?;
+    let sql = format!(
+        "SELECT {CONVERSATION_COLUMNS} FROM conversations c
+          WHERE c.workspace_id = $1 AND c.kind IN ('public', 'private') AND (
+              (c.kind = 'public' AND $3)
+              OR EXISTS (SELECT 1 FROM access_intervals ai WHERE ai.conversation_id = c.id
+                          AND ai.user_id = $2 AND ai.left_seq IS NULL))
+          ORDER BY c.name"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(workspace_id)
+        .bind(auth.user_id)
+        .bind(role != Role::Guest)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(Json(ConversationList {
+        conversations: rows
+            .iter()
+            .map(row_to_conversation)
+            .collect::<ApiResult<_>>()?,
+    }))
+}
+
+#[utoipa::path(post, path = "/v1/conversations/{id}/join", params(("id" = Uuid, Path)),
+    responses((status = 204), (status = 403)))]
+pub async fn join(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(conversation_id): Path<Uuid>,
+) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = state.pool.begin().await?;
+    let c = load(&mut tx, conversation_id).await?;
+    let role = role_in(&mut tx, c.workspace_id, auth.user_id).await?;
+    if c.kind != ConversationKind::Public || role == Role::Guest {
+        return Err(ApiError::Forbidden);
+    }
+    if let Some(e) = grant(&mut tx, &c, auth.user_id, AccessVia::Membership).await? {
+        sync::append(&mut tx, c.workspace_id, vec![e]).await?;
+    }
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(post, path = "/v1/conversations/{id}/leave", params(("id" = Uuid, Path)),
+    responses((status = 204)))]
+pub async fn leave(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(conversation_id): Path<Uuid>,
+) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = state.pool.begin().await?;
+    let ws = workspace_of(&mut tx, conversation_id).await?;
+    if let Some(e) = revoke(
+        &mut tx,
+        conversation_id,
+        auth.user_id,
+        AccessVia::Membership,
+    )
+    .await?
+    {
+        sync::append(&mut tx, ws, vec![e]).await?;
+    }
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Adds a workspace member to a channel. Anyone who can read the channel may add people.
+#[utoipa::path(post, path = "/v1/conversations/{id}/members", params(("id" = Uuid, Path)),
+    request_body = AddConversationMember, responses((status = 204), (status = 403)))]
+pub async fn add_member(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(conversation_id): Path<Uuid>,
+    Json(req): Json<AddConversationMember>,
+) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = state.pool.begin().await?;
+    let c = load(&mut tx, conversation_id).await?;
+    if !matches!(c.kind, ConversationKind::Public | ConversationKind::Private)
+        || !can_read_now(&mut tx, c.id, auth.user_id).await
+    {
+        return Err(ApiError::Forbidden);
+    }
+    role_in(&mut tx, c.workspace_id, req.user_id)
+        .await
+        .map_err(|_| ApiError::BadRequest("not a member of this workspace".into()))?;
+    if let Some(e) = grant(&mut tx, &c, req.user_id, AccessVia::Membership).await? {
+        sync::append(&mut tx, c.workspace_id, vec![e]).await?;
+    }
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Removes someone's membership of a channel. Owners and admins, or the member themself.
+#[utoipa::path(delete, path = "/v1/conversations/{id}/members/{user_id}",
+    params(("id" = Uuid, Path), ("user_id" = Uuid, Path)), responses((status = 204), (status = 403)))]
+pub async fn remove_member(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((conversation_id, user_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = state.pool.begin().await?;
+    let c = load(&mut tx, conversation_id).await?;
+    let role = role_in(&mut tx, c.workspace_id, auth.user_id).await?;
+    if user_id != auth.user_id && !role.reads_private_channels() {
+        return Err(ApiError::Forbidden);
+    }
+    if let Some(e) = revoke(&mut tx, c.id, user_id, AccessVia::Membership).await? {
+        sync::append(&mut tx, c.workspace_id, vec![e]).await?;
+    }
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Opens (or returns) the DM or group DM between the caller and `user_ids`.
+#[utoipa::path(post, path = "/v1/workspaces/{id}/dms", params(("id" = Uuid, Path)),
+    request_body = OpenDm, responses((status = 200, body = Conversation)))]
+pub async fn open_dm(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+    Json(req): Json<OpenDm>,
+) -> ApiResult<Json<Conversation>> {
+    let mut ids: Vec<Uuid> = req.user_ids.clone();
+    ids.push(auth.user_id);
+    ids.sort();
+    ids.dedup();
+    if ids.len() > 9 {
+        return Err(ApiError::BadRequest(
+            "group DMs hold at most 9 people".into(),
+        ));
+    }
+    let mut tx = state.pool.begin().await?;
+    for u in &ids {
+        role_in(&mut tx, workspace_id, *u)
+            .await
+            .map_err(|_| ApiError::BadRequest("everyone must be in this workspace".into()))?;
+    }
+    let key = ids
+        .iter()
+        .map(Uuid::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let existing: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM conversations WHERE workspace_id = $1 AND dm_key = $2")
+            .bind(workspace_id)
+            .bind(&key)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(id) = existing {
+        tx.rollback().await?;
+        let mut conn = state.pool.acquire().await?;
+        return Ok(Json(load(&mut conn, id).await?));
+    }
+    let kind = if ids.len() <= 2 {
+        ConversationKind::Dm
+    } else {
+        ConversationKind::GroupDm
+    };
+    let mut c = create(&mut tx, workspace_id, kind, None, Some(&key), false).await?;
+    c.dm_user_ids = ids.clone();
+    let mut events = vec![];
+    for u in &ids {
+        events.extend(grant(&mut tx, &c, *u, AccessVia::Membership).await?);
+    }
+    sync::append(&mut tx, workspace_id, events).await?;
+    tx.commit().await?;
+    Ok(Json(c))
 }

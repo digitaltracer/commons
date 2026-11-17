@@ -4,7 +4,8 @@ use crate::sqlx::PgConnection;
 use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use proto::api::{AddWorkspaceMember, CreateWorkspace, MemberList, WorkspaceList};
+use proto::api::{AddWorkspaceMember, CreateWorkspace, MemberList, SetRole, WorkspaceList};
+use proto::events::UserEventBody;
 use proto::events::{AccessVia, WorkspaceEventBody};
 use proto::model::{ConversationKind, Member, Role, Workspace};
 use uuid::Uuid;
@@ -19,6 +20,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/workspaces", get(list).post(create))
         .route("/workspaces/{id}/members", get(members).post(add_member))
+        .route(
+            "/workspaces/{id}/members/{user_id}",
+            axum::routing::patch(set_role).delete(remove_member),
+        )
 }
 
 pub async fn require_role(
@@ -266,4 +271,102 @@ pub async fn add_member(
         display_name,
         role: req.role,
     }))
+}
+
+/// Changes a member's role. Gaining or losing admin opens or closes role-derived access to
+/// every private channel in the same transaction.
+#[utoipa::path(patch, path = "/v1/workspaces/{id}/members/{user_id}",
+    params(("id" = Uuid, Path), ("user_id" = Uuid, Path)), request_body = SetRole,
+    responses((status = 204), (status = 403)))]
+pub async fn set_role(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((workspace_id, user_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<SetRole>,
+) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = state.pool.begin().await?;
+    let mine = require_role(
+        &mut tx,
+        workspace_id,
+        auth.user_id,
+        &[Role::Owner, Role::Admin],
+    )
+    .await?;
+    let old = sync::active_role(&mut tx, workspace_id, user_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if (old == Role::Owner || req.role == Role::Owner) && mine != Role::Owner {
+        return Err(ApiError::Forbidden);
+    }
+    if old == req.role {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+    sqlx::query("UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(req.role.as_str())
+        .execute(&mut *tx)
+        .await?;
+    let mut events = vec![NewEvent::workspace(WorkspaceEventBody::MemberRoleChanged {
+        user_id,
+        role: req.role,
+    })];
+    match (
+        old.reads_private_channels(),
+        req.role.reads_private_channels(),
+    ) {
+        (false, true) => events.extend(grant_role_access(&mut tx, workspace_id, user_id).await?),
+        (true, false) => {
+            let private: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM conversations WHERE workspace_id = $1 AND kind = 'private'",
+            )
+            .bind(workspace_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for c in private {
+                events.extend(conversations::revoke(&mut tx, c, user_id, AccessVia::Role).await?);
+            }
+        }
+        _ => {}
+    }
+    sync::append(&mut tx, workspace_id, events).await?;
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Removes someone from the workspace: every access interval closes, and the user's own
+/// stream gets `workspace_removed`, which drives their client's purge.
+#[utoipa::path(delete, path = "/v1/workspaces/{id}/members/{user_id}",
+    params(("id" = Uuid, Path), ("user_id" = Uuid, Path)), responses((status = 204), (status = 403)))]
+pub async fn remove_member(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((workspace_id, user_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = state.pool.begin().await?;
+    let mine = sync::active_role(&mut tx, workspace_id, auth.user_id)
+        .await?
+        .ok_or(ApiError::Forbidden)?;
+    let theirs = sync::active_role(&mut tx, workspace_id, user_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let allowed = user_id == auth.user_id
+        || mine == Role::Owner
+        || (mine == Role::Admin && theirs != Role::Owner);
+    if !allowed {
+        return Err(ApiError::Forbidden);
+    }
+    let mut events = conversations::revoke_all(&mut tx, workspace_id, user_id).await?;
+    events.push(
+        NewEvent::workspace(WorkspaceEventBody::WorkspaceMemberLeft { user_id }).about(user_id),
+    );
+    sync::append(&mut tx, workspace_id, events).await?;
+    sync::append_user(
+        &mut tx,
+        user_id,
+        vec![UserEventBody::WorkspaceRemoved { workspace_id }],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

@@ -10,8 +10,14 @@ pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
 }
 
 /// Migrations, embedded so `commonsd` is a single self-contained binary.
-const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "init", include_str!("../migrations/0001_init.sql")),
+    (
+        2,
+        "user stream",
+        include_str!("../migrations/0002_user_stream.sql"),
+    ),
+];
 
 pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
     use std::borrow::Cow;

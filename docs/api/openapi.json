@@ -124,6 +124,118 @@
         }
       }
     },
+    "/v1/conversations/{id}/join": {
+      "post": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "operationId": "join",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {}
+        }
+      }
+    },
+    "/v1/conversations/{id}/leave": {
+      "post": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "operationId": "leave",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {}
+        }
+      }
+    },
+    "/v1/conversations/{id}/members": {
+      "post": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "summary": "Adds a workspace member to a channel. Anyone who can read the channel may add people.",
+        "operationId": "add_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddConversationMember"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "403": {}
+        }
+      }
+    },
+    "/v1/conversations/{id}/members/{user_id}": {
+      "delete": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "summary": "Removes someone's membership of a channel. Owners and admins, or the member themself.",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {}
+        }
+      }
+    },
     "/v1/conversations/{id}/messages": {
       "get": {
         "tags": [
@@ -270,6 +382,45 @@
         }
       }
     },
+    "/v1/sync/user": {
+      "get": {
+        "tags": [
+          "crate::sync"
+        ],
+        "operationId": "replay_user",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserReplay"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sync/workspaces/{id}": {
       "get": {
         "tags": [
@@ -365,6 +516,76 @@
         }
       }
     },
+    "/v1/workspaces/{id}/channels": {
+      "get": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "summary": "Channels the caller can see: every public channel (except for guests) and the private\nchannels they can read.",
+        "operationId": "browse",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "summary": "Creates a public or private channel; the creator joins it. Owners and admins get\nrole-derived access to a private channel in the same transaction.",
+        "operationId": "create_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannel"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Conversation"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{id}/conversations": {
       "get": {
         "tags": [
@@ -388,6 +609,47 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ConversationList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{id}/dms": {
+      "post": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "summary": "Opens (or returns) the DM or group DM between the caller and `user_ids`.",
+        "operationId": "open_dm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenDm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Conversation"
                 }
               }
             }
@@ -463,6 +725,80 @@
           }
         }
       }
+    },
+    "/v1/workspaces/{id}/members/{user_id}": {
+      "delete": {
+        "tags": [
+          "crate::directory"
+        ],
+        "summary": "Removes someone from the workspace: every access interval closes, and the user's own\nstream gets `workspace_removed`, which drives their client's purge.",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {}
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::directory"
+        ],
+        "summary": "Changes a member's role. Gaining or losing admin opens or closes role-derived access to\nevery private channel in the same transaction.",
+        "operationId": "set_role",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRole"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "403": {}
+        }
+      }
     }
   },
   "components": {
@@ -474,6 +810,18 @@
           "membership",
           "role"
         ]
+      },
+      "AddConversationMember": {
+        "type": "object",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
       },
       "AddWorkspaceMember": {
         "type": "object",
@@ -546,6 +894,21 @@
             "items": {
               "$ref": "#/components/schemas/Conversation"
             }
+          }
+        }
+      },
+      "CreateChannel": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ConversationKind"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -978,6 +1341,21 @@
           "thread_reply"
         ]
       },
+      "OpenDm": {
+        "type": "object",
+        "required": [
+          "user_ids"
+        ],
+        "properties": {
+          "user_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
       "Preferences": {
         "type": "object",
         "properties": {
@@ -1144,6 +1522,17 @@
           },
           "user": {
             "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "SetRole": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
           }
         }
       },

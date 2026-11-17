@@ -9,6 +9,8 @@ pub use sqlx_core::query_scalar::query_scalar;
 pub use sqlx_core::row::Row;
 pub use sqlx_postgres::{PgConnection, PgPool, Postgres};
 
+pub type Transaction<'c> = sqlx_core::transaction::Transaction<'c, Postgres>;
+
 pub mod postgres {
     pub use sqlx_postgres::*;
 }
