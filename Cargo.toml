@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/proto",
+    "crates/server",
+    "crates/client-core",
+    "apps/desktop",
+    "apps/desktop-ui",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[workspace.dependencies]
+proto = { path = "crates/proto" }
+server = { path = "crates/server" }
+client-core = { path = "crates/client-core" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+async-trait = "0.1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

@@ -1,0 +1,4 @@
+/target
+/apps/desktop-ui/dist
+/apps/desktop/gen
+.DS_Store
