@@ -394,3 +394,46 @@ A second implementer built steps 4 and 5 on `f2e255a`. Before starting, I confir
 - **URL form on Linux and Windows is untested.** `views::file_url` uses the macOS form, `commons-file://localhost/…`, and Windows uses `http://commons-file.localhost/…`.
 - **Search is measured locally only.** The VPS run for ADR 0003 is still to do. CJK remains the known v1 limit.
 - **Open question for the user:** does the Tantivy trigger's p95 mean one searcher at a time, which reads 257 ms, or concurrent load, which reads 528 ms with eight searchers?
+
+## As built, desktop UI (2026-11-18)
+
+A third implementer finished the v1 desktop UI on `736c7a5`, against the mockup boards (channel and thread, search, reconnecting, switcher).
+
+**Gaps**
+1. **Mentions: done.** Mention and channel-link entities render as highlighted, clickable spans (`proto::markdown::render_with_entities`). Mentions of the reader are amber, and so is the whole row. Clicking a person opens their profile card. The composer offers @-autocomplete from the conversation's members and sends the picked mentions as entities. The core merges them with names it parses from the text, and the picked ones win.
+2. **Reactions: done.** A compact emoji grid with the account's 8 most recent emoji replaces "React 👍". The same picker inserts emoji in the composer.
+3. **Presence: done.** The core seeds presence from `GET /workspaces/{id}/presence` when the socket connects, and clears it when the socket drops. Dots show on DM rows, member lists, autocomplete and the profile card.
+4. **Members: done.** A new `GET /conversations/{id}/members` endpoint is open to anyone who can read the conversation now. The member panel adds people to channels and group DMs, removes them if the caller's role allows it, and leaves. Group DMs take new members, up to 9, and their key follows the current set.
+5. **Notification preferences: done.** Per-conversation mute (header bell, member panel). A preferences dialog covers the channel level, keywords and muted conversations, and saves through `PUT /me/preferences`, which the notify module reads.
+6. **Reconnecting state: done.** Each account gets its own banner with a countdown to the next attempt and a Try now button, while other accounts stay usable. Queued sends show in place with Edit and Delete. Conversations with queued sends get a clock icon, and the footer counts the waiting messages. The rail marks an account that is reconnecting or signed out.
+7. **Account switcher: done.** It opens from the current workspace tile or the workspace name. It shows each account's status and its workspaces with unread and mention marks and ⌘1…⌘9. It filters, creates workspaces, adds accounts and removes accounts. A revoked account gets a Sign in prompt, which signs it back in and keeps its cache and outbox (`Core::sign_in_again`).
+8. **Search UI: done.** A full search view opens from ⌘K or the header field. It has a sort label (most recent first, the only order the server has), the CJK notice, result cards with author, place, thread and DM notes, file-name and file-text tags, and Show more (offset paging). There are no filter chips or tabs, because the server has no filters.
+9. **Visual design: done.** It follows the mockup's light and dark tokens as CSS variables, uses the system font stack, and puts the traffic lights in an overlay title bar with drag regions. It has no blur.
+
+**Fixes found by running the app**
+- Threads opened empty, and replies named the wrong root. Views key messages by client id, so the shell now resolves thread roots to server ids. This bug predates this work.
+- `member_added` for a group DM carried the member set from before the add, so clients kept the old title.
+- The reaction picker was clipped by the scrolling list. It now floats at the button.
+- An offline thumbnail showed a broken image. It now falls back to the file icon.
+
+**Deviations**
+- The UI landed as one commit, after the server, proto, core and shell commits, not one commit per gap. The redesign touches every view.
+- No sidebar vibrancy. The flat tint stands in for it, as the mockup notes.
+
+**Assumptions (routine choices)**
+- Nobody removes someone else from a DM or group DM; they can only leave. Adding someone to a 1:1 DM starts a group DM. Removal from channels is for owners and admins.
+- The preferences dialog offers two levels. The notify module treats "mentions" and "nothing" the same, so a third option would mislead.
+- Editing a queued send discards it and puts its text back in the composer.
+- Recent emoji are per account, in the core's meta table.
+- Attachments download through a native Save dialog and the core (`save_file`), not webview navigation.
+- Browse lists every visible channel. The ones already joined show Open.
+
+**Run in the app** (`cargo xtask dev`, tmpfs Postgres, plus a second local server for a second account). The webview had no screen-capture permission, so screenshots are WKWebView snapshots taken through a temporary debug hook that was never committed. They show the webview only, without the native traffic lights. Every one of these flows worked: sign in, register a second account, mention autocomplete and send (the entity was checked on the server), reaction picker and recent emoji, presence, members add, remove and leave, mute, preferences and keywords (checked on the server), offline banner and queued send delivered exactly once after restart, revoked session and sign-in again, switcher, ⌘K search and opening a result, thread reply, attach, download (byte-identical), new group DM and adding to it, create, browse, join and leave a channel, edit, delete, profile card to DM, ⌘2, and the light theme (forced by injecting the light tokens).
+
+**Not exercised, or not done**
+- The typing indicator with a second person typing, OS notifications, the stale-edit draft banner, Retry and Discard on a failed send, Show more, and removal refused for a plain member. Only the server test covers that last one.
+- The VoiceOver pass is still the user's.
+- An account went signed out after a dev rebuild, although its keychain token was valid on the server. My guess is keychain access refused to the newly ad-hoc-signed binary. That is not verified. Signing in again recovered it.
+- A deleted message is dropped from the window, so the tombstone row never shows.
+- Search opens the conversation but doesn't scroll to the hit.
+- Thumbnails are not cached for offline use.
