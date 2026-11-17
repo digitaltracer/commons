@@ -153,6 +153,7 @@ pub trait Storage: Send + Sync {
     -> anyhow::Result<Vec<(Conversation, Option<i64>)>>;
     fn conversation(&self, id: Uuid) -> anyhow::Result<Option<(Conversation, Option<i64>)>>;
     fn message(&self, id: Uuid) -> anyhow::Result<Option<Message>>;
+    fn message_by_client_id(&self, client_id: Uuid) -> anyhow::Result<Option<Message>>;
     fn messages(&self, conversation_id: Uuid) -> anyhow::Result<Vec<Message>>;
     /// Rows for a window, oldest first, plus the total row count.
     fn window(
@@ -655,6 +656,17 @@ impl Storage for SqliteStore {
 
     fn message(&self, id: Uuid) -> anyhow::Result<Option<Message>> {
         Ok(get_message(&self.lock(), &id.to_string())?)
+    }
+
+    fn message_by_client_id(&self, client_id: Uuid) -> anyhow::Result<Option<Message>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT json FROM messages WHERE client_id = ?1",
+                [client_id.to_string()],
+                |r| json(r.get(0)?),
+            )
+            .optional()?)
     }
 
     fn messages(&self, conversation_id: Uuid) -> anyhow::Result<Vec<Message>> {

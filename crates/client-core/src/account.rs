@@ -351,7 +351,7 @@ impl Account {
         ops.push(Op::SetUserSince(next_since.max(since)));
         self.commit(ops)?;
         for n in notifications {
-            crate::account::present(self, &n);
+            present_notification(self, &n);
         }
         Ok(added)
     }
@@ -973,7 +973,7 @@ impl Account {
         thread_root_id: Option<Uuid>,
         attachments: Vec<Uuid>,
     ) -> anyhow::Result<Uuid> {
-        let entities = crate::account::mentions(&*self.store, conversation_id, &body)?;
+        let entities = mentions(&*self.store, conversation_id, &body)?;
         self.queue(
             conversation_id,
             OutboxKind::Send {
@@ -983,6 +983,73 @@ impl Account {
                 attachments,
             },
         )
+    }
+
+    pub fn edit_message(
+        &self,
+        conversation_id: Uuid,
+        message_id: Uuid,
+        base_revision: i64,
+        body: String,
+    ) -> anyhow::Result<Uuid> {
+        let entities = mentions(&*self.store, conversation_id, &body)?;
+        self.queue(
+            conversation_id,
+            OutboxKind::Edit {
+                message_id,
+                base_revision,
+                body,
+                entities,
+            },
+        )
+    }
+
+    pub fn delete_message(&self, conversation_id: Uuid, message_id: Uuid) -> anyhow::Result<Uuid> {
+        self.queue(conversation_id, OutboxKind::Delete { message_id })
+    }
+
+    /// Adds the reaction, or removes it if this user already reacted with it.
+    pub fn toggle_reaction(
+        &self,
+        conversation_id: Uuid,
+        message_id: Uuid,
+        emoji: String,
+    ) -> anyhow::Result<Uuid> {
+        let mine = self.store.message(message_id)?.is_some_and(|m| {
+            m.reactions
+                .iter()
+                .any(|r| r.emoji == emoji && r.user_ids.contains(&self.user.id))
+        });
+        self.queue(
+            conversation_id,
+            OutboxKind::React {
+                message_id,
+                emoji,
+                add: !mine,
+            },
+        )
+    }
+
+    /// Marks a conversation read up to its newest cached message, here and on the server.
+    pub async fn mark_read(&self, conversation_id: Uuid) -> Result<(), SyncError> {
+        let seq = self.store.latest_seq(conversation_id)?;
+        if seq <= self.store.read_cursor(conversation_id)? {
+            return Ok(());
+        }
+        self.commit(vec![Op::SetReadCursor {
+            conversation_id,
+            seq,
+        }])?;
+        let _: serde_json::Value = self
+            .api(
+                Method::Post,
+                &format!("/conversations/{conversation_id}/read"),
+                &[],
+                Some(&proto::api::MarkRead { seq }),
+                None,
+            )
+            .await?;
+        Ok(())
     }
 
     pub fn retry(&self, id: Uuid) -> anyhow::Result<()> {
@@ -1067,23 +1134,216 @@ impl RowSource for Inner {
     }
 }
 
-/// Edits, deletes and reactions arrive in step 3.
+/// Delivers edits, deletes and reactions. Edits carry their outbox id as the idempotency
+/// key, so a retried edit that already landed is not mistaken for a stale one.
 async fn deliver_other(
-    _account: &Account,
-    _item: &OutboxItem,
-    _kind: &OutboxKind,
+    account: &Account,
+    item: &OutboxItem,
+    kind: &OutboxKind,
 ) -> Result<Option<Message>, SyncError> {
-    Err(SyncError::Other(anyhow::anyhow!("unsupported outbox item")))
+    match kind {
+        OutboxKind::Edit {
+            message_id,
+            base_revision,
+            body,
+            entities,
+        } => {
+            let req = proto::api::EditMessage {
+                body: body.clone(),
+                entities: entities.clone(),
+                base_revision: *base_revision,
+            };
+            let m: Message = account
+                .api(
+                    Method::Patch,
+                    &format!("/messages/{message_id}"),
+                    &[],
+                    Some(&req),
+                    Some(item.id),
+                )
+                .await?;
+            Ok(Some(m))
+        }
+        OutboxKind::Delete { message_id } => {
+            let m: Message = account
+                .api(
+                    Method::Delete,
+                    &format!("/messages/{message_id}"),
+                    &[],
+                    None::<&()>,
+                    Some(item.id),
+                )
+                .await?;
+            Ok(Some(m))
+        }
+        OutboxKind::React {
+            message_id,
+            emoji,
+            add,
+        } => {
+            let method = if *add { Method::Put } else { Method::Delete };
+            let path = format!("/messages/{message_id}/reactions/{}", encode_segment(emoji));
+            let _: serde_json::Value = account.api(method, &path, &[], None::<&()>, None).await?;
+            Ok(None)
+        }
+        OutboxKind::Send { .. } => unreachable!("sends are delivered by Account::deliver"),
+    }
 }
 
-/// Mentions arrive in step 3.
-fn mentions(
-    _store: &dyn Storage,
-    _conversation_id: Uuid,
-    _body: &str,
+fn encode_segment(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Turns `@Display Name` into mention entities for members of the conversation's workspace.
+/// Longer names win, so "@Ann Lee" is not read as "@Ann".
+pub fn mentions(
+    store: &dyn Storage,
+    conversation_id: Uuid,
+    body: &str,
 ) -> anyhow::Result<Vec<proto::model::Entity>> {
-    Ok(vec![])
+    let Some((conv, _)) = store.conversation(conversation_id)? else {
+        return Ok(vec![]);
+    };
+    let mut members = store.members(conv.workspace_id)?;
+    members.sort_by_key(|m| std::cmp::Reverse(m.display_name.len()));
+    let mut taken = vec![false; body.len()];
+    let mut out = vec![];
+    for m in members {
+        let needle = format!("@{}", m.display_name);
+        for (start, _) in body.match_indices(&needle) {
+            let end = start + needle.len();
+            let boundary = body[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric());
+            if !boundary || taken[start..end].iter().any(|t| *t) {
+                continue;
+            }
+            taken[start..end].iter_mut().for_each(|t| *t = true);
+            out.push(proto::model::Entity::Mention {
+                user_id: m.user_id,
+                start: start as u32,
+                end: end as u32,
+            });
+        }
+    }
+    out.sort_by_key(|e| match e {
+        proto::model::Entity::Mention { start, .. } => *start,
+        _ => 0,
+    });
+    Ok(out)
 }
 
-/// Notifications arrive in step 3.
-fn present(_account: &Account, _n: &Notification) {}
+/// The core's presentation rule: notifications for the conversation in focus are not shown.
+/// The OS applies its own do-not-disturb (Focus) setting to what is shown.
+pub fn should_present(focused: Option<Uuid>, n: &Notification) -> bool {
+    focused != Some(n.conversation_id)
+}
+
+fn present_notification(account: &Account, n: &Notification) {
+    (account.events)(account.id, AccountEvent::Notification(n.clone()));
+    if !should_present(account.focused(), n) {
+        return;
+    }
+    let title = match n.reason {
+        proto::model::NotifyReason::DirectMessage => n.author_name.clone(),
+        _ => {
+            let channel = account
+                .store
+                .conversation(n.conversation_id)
+                .ok()
+                .flatten()
+                .and_then(|(c, _)| c.name)
+                .map(|c| format!(" in #{c}"))
+                .unwrap_or_default();
+            format!("{}{channel}", n.author_name)
+        }
+    };
+    account.notifier().show(account.id, &title, &n.preview, n);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::SqliteStore;
+    use proto::model::{Conversation, ConversationKind, Member, NotifyReason, Role, Workspace};
+
+    fn n(conv: Uuid) -> Notification {
+        Notification {
+            message_id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            conversation_id: conv,
+            author_id: Uuid::nil(),
+            author_name: "a".into(),
+            reason: NotifyReason::Mention,
+            preview: "p".into(),
+        }
+    }
+
+    #[test]
+    fn focused_conversation_is_not_shown() {
+        let c = Uuid::from_u128(1);
+        assert!(!should_present(Some(c), &n(c)));
+        assert!(should_present(Some(Uuid::from_u128(2)), &n(c)));
+        assert!(should_present(None, &n(c)));
+    }
+
+    #[test]
+    fn mentions_prefer_the_longest_name() {
+        let store = SqliteStore::in_memory().unwrap();
+        let ws = Uuid::from_u128(9);
+        let conv = Conversation {
+            id: Uuid::from_u128(8),
+            workspace_id: ws,
+            kind: ConversationKind::Public,
+            name: Some("g".into()),
+            dm_user_ids: vec![],
+        };
+        let ann = Uuid::from_u128(1);
+        let ann_lee = Uuid::from_u128(2);
+        store
+            .commit(vec![
+                Op::AddWorkspace {
+                    workspace: Workspace {
+                        id: ws,
+                        name: "w".into(),
+                    },
+                    since: 0,
+                },
+                Op::GrantAccess {
+                    conversation: conv.clone(),
+                    access_seq: 1,
+                },
+                Op::UpsertMember(Member {
+                    user_id: ann,
+                    workspace_id: ws,
+                    display_name: "Ann".into(),
+                    role: Role::Member,
+                }),
+                Op::UpsertMember(Member {
+                    user_id: ann_lee,
+                    workspace_id: ws,
+                    display_name: "Ann Lee".into(),
+                    role: Role::Member,
+                }),
+            ])
+            .unwrap();
+        let e = mentions(&store, conv.id, "hi @Ann Lee and @Ann, not @Annie").unwrap();
+        let ids: Vec<Uuid> = e
+            .iter()
+            .map(|e| match e {
+                proto::model::Entity::Mention { user_id, .. } => *user_id,
+                _ => Uuid::nil(),
+            })
+            .collect();
+        assert_eq!(ids, vec![ann_lee, ann]);
+    }
+}
