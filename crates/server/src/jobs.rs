@@ -101,9 +101,12 @@ async fn dispatch(state: &AppState, job: &Job) -> anyhow::Result<()> {
     crate::jobs::handle(state, job).await
 }
 
-/// Job handlers by kind. Later steps add notify, extraction and thumbnails.
-pub async fn handle(_state: &AppState, job: &Job) -> anyhow::Result<()> {
-    anyhow::bail!("unknown job kind {}", job.kind)
+/// Job handlers by kind.
+pub async fn handle(state: &AppState, job: &Job) -> anyhow::Result<()> {
+    match job.kind.as_str() {
+        crate::notify::JOB => crate::notify::run(state, &job.payload).await,
+        other => anyhow::bail!("unknown job kind {other}"),
+    }
 }
 
 /// Polls for jobs with at most `job_workers` running at once, plus hourly maintenance.

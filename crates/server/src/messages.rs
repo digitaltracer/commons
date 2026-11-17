@@ -4,9 +4,10 @@ use std::collections::HashMap;
 
 use crate::sqlx::{PgConnection, Row};
 use axum::extract::{Path, Query, State};
-use axum::routing::get;
+use axum::http::HeaderMap;
+use axum::routing::{get, patch, put};
 use axum::{Json, Router};
-use proto::api::{MessagePage, SendMessage};
+use proto::api::{EditConflict, EditMessage, MessagePage, SendMessage};
 use proto::events::WorkspaceEventBody;
 use proto::model::{Entity, Message, Reaction};
 use serde::Deserialize;
@@ -22,7 +23,13 @@ use crate::sync::{self, NewEvent};
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/conversations/{id}/messages", get(history).post(send))
+    Router::new()
+        .route("/conversations/{id}/messages", get(history).post(send))
+        .route("/messages/{id}", patch(edit).delete(delete))
+        .route(
+            "/messages/{id}/reactions/{emoji}",
+            put(react).delete(unreact),
+        )
 }
 
 const MESSAGE_COLUMNS: &str = "m.id, m.workspace_id, m.conversation_id, m.author_id, m.client_id,
@@ -108,14 +115,15 @@ pub async fn load_one(conn: &mut PgConnection, id: Uuid) -> ApiResult<Message> {
         .ok_or(ApiError::NotFound)
 }
 
-/// Checks entity offsets and that every mention targets a member of the conversation.
+/// Checks entity offsets, and keeps only mentions of members of the conversation.
 pub async fn validate_entities(
     conn: &mut PgConnection,
     workspace_id: Uuid,
     conversation_id: Uuid,
     body: &str,
     entities: &[Entity],
-) -> ApiResult<()> {
+) -> ApiResult<Vec<Entity>> {
+    let mut kept = Vec::with_capacity(entities.len());
     for e in entities {
         let (start, end) = match e {
             Entity::Mention { start, end, .. }
@@ -133,10 +141,10 @@ pub async fn validate_entities(
         }
         match e {
             Entity::Mention { user_id, .. } => {
+                // A mention of someone outside the conversation stays plain text: it is not
+                // stored as an entity and notifies nobody.
                 if !conversations::can_read_now(conn, conversation_id, *user_id).await {
-                    return Err(ApiError::BadRequest(
-                        "mentions must target members of the conversation".into(),
-                    ));
+                    continue;
                 }
             }
             Entity::ChannelLink {
@@ -160,8 +168,9 @@ pub async fn validate_entities(
                 }
             }
         }
+        kept.push(e.clone());
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// Send a message. Resending with the same `client_id` returns the first result.
@@ -208,7 +217,7 @@ pub async fn send(
             return Err(ApiError::BadRequest("thread root not found".into()));
         }
     }
-    validate_entities(
+    let entities = validate_entities(
         &mut tx,
         workspace_id,
         conversation_id,
@@ -224,7 +233,7 @@ pub async fn send(
     )
     .await?;
     let id = Uuid::now_v7();
-    let entities = serde_json::to_value(&req.entities).map_err(|e| ApiError::Internal(e.into()))?;
+    let entities = serde_json::to_value(&entities).map_err(|e| ApiError::Internal(e.into()))?;
     sqlx::query(
         "INSERT INTO messages (id, workspace_id, conversation_id, author_id, client_id,
                                thread_root_id, body, entities, attachments)
@@ -279,8 +288,9 @@ pub async fn check_attachments(
     Ok(vec![])
 }
 
-/// Work queued in the same transaction as a new message. Notifications arrive in step 3.
-pub async fn after_post(_conn: &mut PgConnection, _message: &Message) -> ApiResult<()> {
+/// Work queued in the same transaction as a new message: the notify job.
+pub async fn after_post(conn: &mut PgConnection, message: &Message) -> ApiResult<()> {
+    crate::notify::enqueue(conn, message).await?;
     Ok(())
 }
 
@@ -341,4 +351,242 @@ pub async fn history(
         messages,
         interval_seq: q.interval_seq.unwrap_or(0),
     }))
+}
+
+fn idempotency_key(headers: &HeaderMap) -> Option<Uuid> {
+    headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+}
+
+/// Locks a message the caller can read. Fails toward deny.
+async fn lock_readable(
+    conn: &mut PgConnection,
+    id: Uuid,
+    user_id: Uuid,
+) -> ApiResult<(Uuid, Uuid, Uuid, i64, bool)> {
+    let row: Option<(Uuid, Uuid, Uuid, i64, bool)> = sqlx::query_as(
+        "SELECT workspace_id, conversation_id, author_id, revision, deleted
+           FROM messages WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let row = row.ok_or(ApiError::NotFound)?;
+    if !conversations::can_read_now(conn, row.1, user_id).await {
+        return Err(ApiError::NotFound);
+    }
+    Ok(row)
+}
+
+/// Edit a message. The edit names the revision it was based on; a stale base is rejected
+/// with 409 and the current message, and an edit of a deleted message gets 410.
+#[utoipa::path(patch, path = "/v1/messages/{id}", params(("id" = Uuid, Path)),
+    request_body = EditMessage,
+    responses((status = 200, body = Message), (status = 409, body = EditConflict), (status = 410, body = EditConflict)))]
+pub async fn edit(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<EditMessage>,
+) -> ApiResult<Json<Message>> {
+    if req.body.len() > MAX_BODY_BYTES {
+        return Err(ApiError::TooLarge("message is too long".into()));
+    }
+    let mut tx = state.pool.begin().await?;
+    let key = idempotency_key(&headers);
+    if let Some(k) = key
+        && let Claim::Replay(prev) = idempotency::claim(&mut tx, auth.user_id, k).await?
+    {
+        tx.rollback().await?;
+        return Ok(Json(
+            serde_json::from_value(prev).map_err(|e| ApiError::Internal(e.into()))?,
+        ));
+    }
+    let (workspace_id, conversation_id, author, revision, deleted) =
+        lock_readable(&mut tx, id, auth.user_id).await?;
+    if author != auth.user_id {
+        return Err(ApiError::Forbidden);
+    }
+    if deleted || revision != req.base_revision {
+        let current = load_one(&mut tx, id).await?;
+        let error = if deleted { "deleted" } else { "stale" };
+        let body = serde_json::to_value(EditConflict {
+            error: error.into(),
+            current,
+        })
+        .map_err(|e| ApiError::Internal(e.into()))?;
+        return Err(if deleted {
+            ApiError::Gone(body)
+        } else {
+            ApiError::Conflict(body)
+        });
+    }
+    let entities = validate_entities(
+        &mut tx,
+        workspace_id,
+        conversation_id,
+        &req.body,
+        &req.entities,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE messages SET body = $2, entities = $3, revision = revision + 1, edited_at = now()
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&req.body)
+    .bind(serde_json::to_value(&entities).map_err(|e| ApiError::Internal(e.into()))?)
+    .execute(&mut *tx)
+    .await?;
+    let mut message = load_one(&mut tx, id).await?;
+    let seqs = sync::append(
+        &mut tx,
+        workspace_id,
+        vec![NewEvent::conversation(WorkspaceEventBody::MessageEdited {
+            message: message.clone(),
+        })],
+    )
+    .await?;
+    message.updated_seq = seqs[0];
+    if let Some(k) = key {
+        idempotency::store(
+            &mut tx,
+            auth.user_id,
+            k,
+            &serde_json::to_value(&message).unwrap_or_default(),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Json(message))
+}
+
+/// Delete a message (its author, or a workspace owner or admin). Delete wins over any edit,
+/// and deleting twice is a no-op.
+#[utoipa::path(delete, path = "/v1/messages/{id}", params(("id" = Uuid, Path)),
+    responses((status = 200, body = Message)))]
+pub async fn delete(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Message>> {
+    let mut tx = state.pool.begin().await?;
+    let (workspace_id, _, author, _, deleted) = lock_readable(&mut tx, id, auth.user_id).await?;
+    if author != auth.user_id {
+        let role = sync::active_role(&mut tx, workspace_id, auth.user_id).await?;
+        if !role.is_some_and(|r| r.reads_private_channels()) {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    if deleted {
+        let m = load_one(&mut tx, id).await?;
+        tx.rollback().await?;
+        return Ok(Json(m));
+    }
+    sqlx::query(
+        "UPDATE messages SET body = '', entities = '[]', attachments = '{}', deleted = true,
+                revision = revision + 1 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM reactions WHERE message_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let mut message = load_one(&mut tx, id).await?;
+    let seqs = sync::append(
+        &mut tx,
+        workspace_id,
+        vec![NewEvent::conversation(WorkspaceEventBody::MessageDeleted {
+            message: message.clone(),
+        })],
+    )
+    .await?;
+    message.updated_seq = seqs[0];
+    tx.commit().await?;
+    Ok(Json(message))
+}
+
+fn check_emoji(e: &str) -> ApiResult<()> {
+    if e.is_empty() || e.len() > 64 || e.chars().any(char::is_whitespace) {
+        return Err(ApiError::BadRequest("bad emoji".into()));
+    }
+    Ok(())
+}
+
+/// Add a reaction. Idempotent; there is no revision check.
+#[utoipa::path(put, path = "/v1/messages/{id}/reactions/{emoji}",
+    params(("id" = Uuid, Path), ("emoji" = String, Path)), responses((status = 204)))]
+pub async fn react(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, emoji)): Path<(Uuid, String)>,
+) -> ApiResult<axum::http::StatusCode> {
+    set_reaction(&state, auth.user_id, id, emoji, true).await
+}
+
+/// Remove a reaction. Idempotent.
+#[utoipa::path(delete, path = "/v1/messages/{id}/reactions/{emoji}",
+    params(("id" = Uuid, Path), ("emoji" = String, Path)), responses((status = 204)))]
+pub async fn unreact(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, emoji)): Path<(Uuid, String)>,
+) -> ApiResult<axum::http::StatusCode> {
+    set_reaction(&state, auth.user_id, id, emoji, false).await
+}
+
+async fn set_reaction(
+    state: &AppState,
+    user_id: Uuid,
+    id: Uuid,
+    emoji: String,
+    add: bool,
+) -> ApiResult<axum::http::StatusCode> {
+    check_emoji(&emoji)?;
+    let mut tx = state.pool.begin().await?;
+    // Lock the message first: its row is stamped by the append below.
+    let (workspace_id, conversation_id, _, _, deleted) =
+        lock_readable(&mut tx, id, user_id).await?;
+    if deleted {
+        return Err(ApiError::Gone(
+            serde_json::json!({"error": "deleted", "message": "message was deleted"}),
+        ));
+    }
+    let changed = if add {
+        sqlx::query("INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
+    } else {
+        sqlx::query("DELETE FROM reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3")
+    }
+    .bind(id)
+    .bind(user_id)
+    .bind(&emoji)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        let body = if add {
+            WorkspaceEventBody::ReactionAdded {
+                conversation_id,
+                message_id: id,
+                user_id,
+                emoji,
+            }
+        } else {
+            WorkspaceEventBody::ReactionRemoved {
+                conversation_id,
+                message_id: id,
+                user_id,
+                emoji,
+            }
+        };
+        sync::append(&mut tx, workspace_id, vec![NewEvent::conversation(body)]).await?;
+    }
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

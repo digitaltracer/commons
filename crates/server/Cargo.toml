@@ -47,6 +47,7 @@ server = { path = ".", features = ["testing"] }
 tokio-tungstenite = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 proptest = "1"
+goose = { version = "0.19", default-features = false, features = ["rustls-tls"] }
 
 [lints]
 workspace = true

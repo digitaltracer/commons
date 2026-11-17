@@ -21,7 +21,8 @@ pub const CHANNEL: &str = "commons";
 
 #[derive(Debug, Clone)]
 pub enum Wakeup {
-    Workspace(Uuid),
+    /// New rows in a workspace stream, read once by this node's feed.
+    Batch(std::sync::Arc<crate::feed::Batch>),
     User,
     Ephemeral(Ephemeral),
     /// Re-read every stream; sent after the NOTIFY listener reconnects.
@@ -55,6 +56,9 @@ pub struct Hub {
     next_id: AtomicU64,
     /// Sockets disconnected because they could not keep up.
     pub dropped_slow: AtomicU64,
+    /// Feed batches filtered in memory, and batches that sent a socket to its own replay.
+    pub batches_filtered: AtomicU64,
+    pub batches_replayed: AtomicU64,
 }
 
 pub struct Registration {
@@ -70,6 +74,8 @@ impl Hub {
             queue: queue.max(1),
             next_id: AtomicU64::new(1),
             dropped_slow: AtomicU64::new(0),
+            batches_filtered: AtomicU64::new(0),
+            batches_replayed: AtomicU64::new(0),
         }
     }
 
@@ -167,16 +173,16 @@ impl Hub {
         }
     }
 
-    pub fn wake_workspace(&self, workspace_id: Uuid) {
+    pub fn batch(&self, batch: std::sync::Arc<crate::feed::Batch>) {
         let inner = self.lock();
         let ids: Vec<u64> = inner
             .by_workspace
-            .get(&workspace_id)
+            .get(&batch.workspace_id)
             .into_iter()
             .flatten()
             .copied()
             .collect();
-        self.deliver(&inner, ids, &Wakeup::Workspace(workspace_id));
+        self.deliver(&inner, ids, &Wakeup::Batch(batch));
     }
 
     pub fn wake_user(&self, user_id: Uuid) {
@@ -209,14 +215,14 @@ impl Hub {
         self.deliver(&inner, ids, &Wakeup::Repair);
     }
 
-    pub fn dispatch(&self, payload: &str) {
+    pub fn dispatch(&self, state: &AppState, payload: &str) {
         let Some((kind, rest)) = payload.split_once(':') else {
             return;
         };
         match kind {
             "w" => {
                 if let Ok(id) = rest.parse() {
-                    self.wake_workspace(id)
+                    state.feeds.wake(state, id)
                 }
             }
             "u" => {
@@ -269,14 +275,16 @@ pub async fn listen(state: AppState, cancel: CancellationToken) {
             continue;
         }
         state.hub.wake_all();
+        state.feeds.wake_all();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 n = listener.try_recv() => match n {
-                    Ok(Some(n)) => state.hub.dispatch(n.payload()),
+                    Ok(Some(n)) => state.hub.dispatch(&state, n.payload()),
                     Ok(None) => {
                         tracing::warn!("notify listener reconnecting");
                         state.hub.wake_all();
+                        state.feeds.wake_all();
                     }
                     Err(e) => {
                         tracing::warn!(error = ?e, "notify listener error");

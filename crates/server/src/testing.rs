@@ -119,6 +119,13 @@ pub async fn spawn(tweak: impl FnOnce(&mut Config)) -> TestServer {
 }
 
 pub async fn spawn_with(config: Config) -> TestServer {
+    // Server logs for a test run, filtered by COMMONS_TEST_LOG (for example "warn").
+    if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_env("COMMONS_TEST_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    }
     let mailer = Arc::new(MemoryMailer::default());
     let state = AppState::new(config, mailer.clone()).await.expect("state");
     let cancel = crate::spawn_background(&state);

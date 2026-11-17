@@ -39,12 +39,18 @@ struct Session {
     user_id: Uuid,
     sink: SplitSink<WebSocket, WsMessage>,
     workspaces: HashMap<Uuid, i64>,
+    /// Access as of each workspace cursor, once the socket has caught up with the feed.
+    access: HashMap<Uuid, crate::feed::Access>,
     user_since: i64,
 }
 
 impl Session {
     async fn send(&mut self, frame: &ServerFrame) -> Result<(), Stop> {
         let text = serde_json::to_string(frame).map_err(|_| Stop::Disconnect)?;
+        self.send_text(text).await
+    }
+
+    async fn send_text(&mut self, text: String) -> Result<(), Stop> {
         match tokio::time::timeout(
             self.state.config.send_timeout,
             self.sink.send(WsMessage::Text(text.into())),
@@ -80,10 +86,23 @@ impl Session {
                     PAGE,
                 )
                 .await?;
+                // Caught up: take the access state in the same snapshot, for the feed.
+                let access = if p.snapshot.is_none() && p.next_since >= p.head {
+                    Some(crate::feed::load_access(&mut tx, workspace_id, self.user_id).await?)
+                } else {
+                    None
+                };
                 tx.commit().await?;
-                Ok::<_, ApiError>(p)
+                Ok::<_, ApiError>((p, access))
             }
             .await;
+            let page = page.map(|(p, access)| {
+                match access {
+                    Some(a) => self.access.insert(workspace_id, a),
+                    None => self.access.remove(&workspace_id),
+                };
+                p
+            });
             match page {
                 Ok(p) if p.snapshot.is_some() => {
                     self.workspaces.remove(&workspace_id);
@@ -127,6 +146,48 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Delivers a feed batch: filtered in memory when it continues this socket's cursor,
+    /// otherwise the socket catches up through its own replay.
+    async fn batch(&mut self, b: std::sync::Arc<crate::feed::Batch>) -> Result<(), Stop> {
+        let Some(&cursor) = self.workspaces.get(&b.workspace_id) else {
+            return Ok(());
+        };
+        if b.to <= cursor {
+            return Ok(());
+        }
+        let Some(access) = self
+            .access
+            .get(&b.workspace_id)
+            .filter(|_| b.from == cursor)
+        else {
+            self.state
+                .hub
+                .batches_replayed
+                .fetch_add(1, Ordering::Relaxed);
+            return self.drain_workspace(b.workspace_id).await;
+        };
+        self.state
+            .hub
+            .batches_filtered
+            .fetch_add(1, Ordering::Relaxed);
+        let (events, end) = access.filter(&b, self.user_id);
+        let Some(events) = events else {
+            self.workspaces.remove(&b.workspace_id);
+            self.access.remove(&b.workspace_id);
+            return Ok(());
+        };
+        let frame = format!(
+            r#"{{"type":"workspace","workspace_id":"{}","events":[{}],"next_since":{}}}"#,
+            b.workspace_id,
+            events.join(","),
+            b.to
+        );
+        self.send_text(frame).await?;
+        self.workspaces.insert(b.workspace_id, b.to);
+        self.access.insert(b.workspace_id, end);
+        Ok(())
     }
 
     async fn drain_user(&mut self) -> Result<(), Stop> {
@@ -234,6 +295,7 @@ async fn run(state: AppState, user_id: Uuid, socket: WebSocket) {
             .map(|c| (c.workspace_id, c.since))
             .collect(),
         user_since,
+        access: HashMap::new(),
     };
     let ws_ids: Vec<Uuid> = session.workspaces.keys().copied().collect();
     state.hub.set_workspaces(reg.id, ws_ids.clone());
@@ -249,7 +311,7 @@ async fn run(state: AppState, user_id: Uuid, socket: WebSocket) {
             tokio::select! {
                 _ = reg.cancel.cancelled() => return Err(Stop::Disconnect),
                 w = reg.rx.recv() => match w {
-                    Some(Wakeup::Workspace(id)) => session.drain_workspace(id).await?,
+                    Some(Wakeup::Batch(b)) => session.batch(b).await?,
                     Some(Wakeup::User) => session.drain_user().await?,
                     Some(Wakeup::Ephemeral(e)) => session.ephemeral(e).await?,
                     Some(Wakeup::Repair) => session.drain_all().await?,
@@ -325,6 +387,7 @@ async fn drain_user_stream(session: &mut Session) -> Result<(), Stop> {
                 }
                 UserEventBody::WorkspaceRemoved { workspace_id } => {
                     session.workspaces.remove(workspace_id);
+                    session.access.remove(workspace_id);
                 }
                 _ => {}
             }

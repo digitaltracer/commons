@@ -476,12 +476,29 @@ pub async fn read_user_page(
     })
 }
 
-/// Read cursors arrive in step 3.
 pub async fn read_cursors(
-    _conn: &mut PgConnection,
-    _user_id: Uuid,
+    conn: &mut PgConnection,
+    user_id: Uuid,
 ) -> ApiResult<Vec<proto::events::ReadCursorState>> {
-    Ok(vec![])
+    let rows: Vec<(Uuid, Uuid, i64)> = sqlx::query_as(
+        "SELECT rc.workspace_id, rc.conversation_id, rc.seq FROM read_cursors rc
+          WHERE rc.user_id = $1 AND EXISTS (SELECT 1 FROM access_intervals ai
+              WHERE ai.conversation_id = rc.conversation_id AND ai.user_id = $1
+                AND ai.left_seq IS NULL)",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(workspace_id, conversation_id, seq)| proto::events::ReadCursorState {
+                workspace_id,
+                conversation_id,
+                seq,
+            },
+        )
+        .collect())
 }
 
 #[utoipa::path(get, path = "/v1/sync/user",

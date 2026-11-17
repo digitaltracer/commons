@@ -17,6 +17,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "user stream",
         include_str!("../migrations/0002_user_stream.sql"),
     ),
+    (
+        3,
+        "messaging",
+        include_str!("../migrations/0003_messaging.sql"),
+    ),
 ];
 
 pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {

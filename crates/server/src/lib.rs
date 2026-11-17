@@ -9,11 +9,14 @@ pub mod conversations;
 pub mod db;
 pub mod directory;
 pub mod error;
+pub mod feed;
 pub mod hub;
 pub mod idempotency;
 pub mod jobs;
 pub mod mail;
+pub mod me;
 pub mod messages;
+pub mod notify;
 pub mod openapi;
 pub mod sqlx;
 pub mod sync;
@@ -33,6 +36,7 @@ pub struct Inner {
     pub pool: sqlx::PgPool,
     pub config: Config,
     pub hub: hub::Hub,
+    pub feeds: feed::Feeds,
     pub mailer: Arc<dyn mail::Mailer>,
     pub limiter: auth::Limiter,
 }
@@ -62,6 +66,7 @@ impl AppState {
             pool,
             config,
             hub,
+            feeds: feed::Feeds::default(),
             mailer,
             limiter,
         }))
@@ -76,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .merge(directory::routes())
         .merge(conversations::routes())
         .merge(messages::routes())
+        .merge(me::routes())
         .merge(sync::routes())
         .route("/socket", get(ws::upgrade))
         .route("/health", post(health).get(health));
@@ -89,7 +95,10 @@ pub fn router(state: AppState) -> Router {
 pub fn spawn_background(state: &AppState) -> tokio_util::sync::CancellationToken {
     let cancel = tokio_util::sync::CancellationToken::new();
     tokio::spawn(hub::listen(state.clone(), cancel.clone()));
-    tokio::spawn(jobs::run_workers(state.clone(), cancel.clone()));
+    // Zero workers leaves jobs queued for the caller to run (tests do this).
+    if state.config.job_workers > 0 {
+        tokio::spawn(jobs::run_workers(state.clone(), cancel.clone()));
+    }
     cancel
 }
 
