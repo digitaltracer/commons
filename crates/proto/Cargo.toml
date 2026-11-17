@@ -1,0 +1,20 @@
+[package]
+name = "proto"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Wire and view-model types shared by the Commons server, core and UI. Safe for WASM."
+
+[features]
+openapi = ["dep:utoipa"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid = { version = "1", features = ["serde"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+utoipa = { version = "6", features = ["uuid"], optional = true }
+
+[lints]
+workspace = true
