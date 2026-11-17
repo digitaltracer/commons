@@ -26,6 +26,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         move_window,
         unsubscribe_window,
         send_message,
+        attach_file,
         edit_message,
         delete_message,
         toggle_reaction,
@@ -132,6 +133,43 @@ fn send_message(
         .map_err(err)?
         .send_message(conversation_id, body, thread_root_id, vec![])
         .map_err(err)
+}
+
+/// Picks a file, uploads it and queues a message carrying it. `None` when the picker was
+/// cancelled.
+#[tauri::command]
+async fn attach_file(
+    app: tauri::AppHandle,
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+) -> R<Option<Uuid>> {
+    use tauri_plugin_dialog::DialogExt;
+    let a = host.core.account(account_id).map_err(err)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Attach a file")
+        .pick_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let Some(picked) = rx.await.map_err(err)? else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(err)?;
+    a.attach_file(conversation_id, thread_root_id, &path)
+        .await
+        .map(Some)
+        .map_err(|e| match e {
+            client_core::account::SyncError::Transport(
+                client_core::transport::TransportError::Status { body, .. },
+            ) => body["message"]
+                .as_str()
+                .unwrap_or("the upload was refused")
+                .to_string(),
+            other => other.to_string(),
+        })
 }
 
 #[tauri::command]

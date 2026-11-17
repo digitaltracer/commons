@@ -313,11 +313,22 @@ pub fn Composer(
                    "body": body, "threadRootId": thread_root_id}),
         );
     };
+    let attach_error = RwSignal::new(None::<String>);
+    let attaching = RwSignal::new(false);
     let attach = move |_| {
-        ipc::command(
-            "attach_file",
-            json!({"accountId": account_id, "conversationId": conversation_id, "threadRootId": thread_root_id}),
-        );
+        attach_error.set(None);
+        attaching.set(true);
+        leptos::task::spawn_local(async move {
+            let r: Result<Option<Uuid>, String> = ipc::invoke(
+                "attach_file",
+                json!({"accountId": account_id, "conversationId": conversation_id, "threadRootId": thread_root_id}),
+            )
+            .await;
+            attaching.set(false);
+            if let Err(e) = r {
+                attach_error.set(Some(format!("Could not attach: {e}")));
+            }
+        });
     };
     view! {
         <form class="composer" on:submit=move |ev| { ev.prevent_default(); send(); }>
@@ -339,8 +350,10 @@ pub fn Composer(
                     }
                 }
             ></textarea>
-            <button type="button" on:click=attach aria-label="Attach a file">"Attach"</button>
+            <button type="button" on:click=attach aria-label="Attach a file"
+                disabled=move || attaching.get()>{move || if attaching.get() { "Uploading…" } else { "Attach" }}</button>
             <button type="submit" class="primary">"Send"</button>
         </form>
+        {move || attach_error.get().map(|e| view! { <p class="error attach-error" role="alert">{e}</p> })}
     }
 }

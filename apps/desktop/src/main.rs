@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod files;
 mod spike;
 
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,18 @@ fn main() {
     let spike_mode = std::env::var("COMMONS_SPIKE").is_ok_and(|v| v == "1");
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol(files::SCHEME, |ctx, request, responder| {
+            let Some(host) = ctx.app_handle().try_state::<Host>() else {
+                responder.respond(files::status(503));
+                return;
+            };
+            let core = host.core.clone();
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn(async move {
+                responder.respond(files::respond(core, &path).await);
+            });
+        })
         .setup(move |app| {
             let runtime = tokio::runtime::Runtime::new()?;
             let handle = runtime.handle().clone();
