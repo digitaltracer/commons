@@ -1,0 +1,37 @@
+[package]
+name = "client-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The headless Commons client: sessions, sync, cache, outbox, unread state and notifications."
+
+[features]
+# Fault injection hooks for crash and race tests.
+testing = []
+
+[dependencies]
+proto.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "query", "http2"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+[dev-dependencies]
+client-core = { path = ".", features = ["testing"] }
+server = { workspace = true, features = ["testing"] }
+proptest = "1"
+tempfile = "3"
+
+[lints]
+workspace = true
