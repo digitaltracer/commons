@@ -164,6 +164,7 @@ fn Sidebar(
                         <p class="status">{format!("{} · {status}", a.display_name)}</p>
                         {a.workspaces.into_iter().map(|w| view! {
                             <h3>{w.name.clone()}</h3>
+                            <WorkspaceTools account_id=account_id workspace_id=w.id selected=selected />
                             <ul>
                                 {w.conversations.into_iter().map(|c| {
                                     let sel = Selection { account_id, conversation_id: c.id };
@@ -296,5 +297,120 @@ fn SignIn(
                 <button type="button" class="linkish" on:click=move |_| on_cancel.run(())>"Cancel"</button>
             </Show>
         </form>
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tool {
+    None,
+    NewChannel,
+    Browse,
+    Dm,
+}
+
+/// Create a channel, browse and join channels, or start a DM in one workspace.
+#[component]
+fn WorkspaceTools(
+    account_id: Uuid,
+    workspace_id: Uuid,
+    selected: RwSignal<Option<Selection>>,
+) -> impl IntoView {
+    let tool = RwSignal::new(Tool::None);
+    let name = RwSignal::new(String::new());
+    let private = RwSignal::new(false);
+    let listed = RwSignal::new(Vec::<proto::model::Conversation>::new());
+    let members = RwSignal::new(Vec::<proto::model::Member>::new());
+    let error = RwSignal::new(None::<String>);
+    let open = move |t: Tool| {
+        error.set(None);
+        tool.set(if tool.get_untracked() == t {
+            Tool::None
+        } else {
+            t
+        });
+        let args = json!({"accountId": account_id, "workspaceId": workspace_id});
+        match tool.get_untracked() {
+            Tool::Browse => leptos::task::spawn_local(async move {
+                match ipc::invoke("browse_channels", args).await {
+                    Ok(l) => listed.set(l),
+                    Err(e) => error.set(Some(e)),
+                }
+            }),
+            Tool::Dm => leptos::task::spawn_local(async move {
+                match ipc::invoke("workspace_members", args).await {
+                    Ok(m) => members.set(m),
+                    Err(e) => error.set(Some(e)),
+                }
+            }),
+            _ => {}
+        }
+    };
+    let go_to = move |c: proto::model::Conversation| {
+        tool.set(Tool::None);
+        selected.set(Some(Selection {
+            account_id,
+            conversation_id: c.id,
+        }));
+    };
+    view! {
+        <div class="tools">
+            <button class="linkish" on:click=move |_| open(Tool::NewChannel)>"+ Channel"</button>
+            <button class="linkish" on:click=move |_| open(Tool::Browse)>"Browse"</button>
+            <button class="linkish" on:click=move |_| open(Tool::Dm)>"+ DM"</button>
+            {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
+            {move || match tool.get() {
+                Tool::NewChannel => view! {
+                    <form on:submit=move |ev| {
+                        ev.prevent_default();
+                        let args = json!({"accountId": account_id, "workspaceId": workspace_id,
+                            "name": name.get_untracked(), "private": private.get_untracked()});
+                        leptos::task::spawn_local(async move {
+                            match ipc::invoke::<proto::model::Conversation>("create_channel", args).await {
+                                Ok(c) => { name.set(String::new()); go_to(c) }
+                                Err(e) => error.set(Some(e)),
+                            }
+                        });
+                    }>
+                        <label>"Name " <input required prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) /></label>
+                        <label><input type="checkbox" prop:checked=move || private.get() on:change=move |ev| private.set(event_target_checked(&ev)) />" Private"</label>
+                        <button type="submit" class="primary">"Create"</button>
+                    </form>
+                }.into_any(),
+                Tool::Browse => view! {
+                    <ul aria-label="Channels you can join">
+                        {move || listed.get().into_iter().map(|c| {
+                            let c2 = c.clone();
+                            view! { <li><button on:click=move |_| {
+                                let c = c2.clone();
+                                let args = json!({"accountId": account_id, "conversationId": c.id});
+                                leptos::task::spawn_local(async move {
+                                    match ipc::invoke::<serde_json::Value>("join_channel", args).await {
+                                        Ok(_) => go_to(c),
+                                        Err(e) => error.set(Some(e)),
+                                    }
+                                });
+                            }>{format!("Join #{}", c.name.clone().unwrap_or_default())}</button></li> }
+                        }).collect_view()}
+                    </ul>
+                }.into_any(),
+                Tool::Dm => view! {
+                    <ul aria-label="Start a direct message">
+                        {move || members.get().into_iter().map(|m| {
+                            let uid = m.user_id;
+                            view! { <li><button on:click=move |_| {
+                                let args = json!({"accountId": account_id, "workspaceId": workspace_id, "userIds": [uid]});
+                                leptos::task::spawn_local(async move {
+                                    match ipc::invoke::<proto::model::Conversation>("open_dm", args).await {
+                                        Ok(c) => go_to(c),
+                                        Err(e) => error.set(Some(e)),
+                                    }
+                                });
+                            }>{m.display_name.clone()}</button></li> }
+                        }).collect_view()}
+                    </ul>
+                }.into_any(),
+                Tool::None => ().into_any(),
+            }}
+        </div>
     }
 }

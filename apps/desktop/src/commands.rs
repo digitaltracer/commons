@@ -1,4 +1,6 @@
 //! Tauri commands: the UI's only way to reach the core.
+use client_core::transport::Method;
+use proto::model::{Conversation, ConversationKind, Member};
 use proto::view::{AppEvent, SidebarView};
 use proto::window::{WindowBatch, WindowSpec};
 use tauri::State;
@@ -29,6 +31,12 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         set_focus,
         typing,
         create_workspace,
+        create_channel,
+        browse_channels,
+        join_channel,
+        leave_channel,
+        workspace_members,
+        open_dm,
         ui_log,
         crate::spike::spike_config,
         crate::spike::spike_report,
@@ -174,10 +182,121 @@ async fn create_workspace(host: State<'_, Host>, account_id: Uuid, name: String)
         )
         .await
         .map_err(err)?;
-    a.sync_once().await.map_err(err)
+    // The new workspace arrives on the user stream.
+    Ok(())
 }
 
 #[tauri::command]
 fn ui_log(message: String) {
     tracing::warn!(target: "ui", "{message}");
+}
+
+#[tauri::command]
+async fn create_channel(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    name: String,
+    private: bool,
+) -> R<Conversation> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let kind = if private {
+        ConversationKind::Private
+    } else {
+        ConversationKind::Public
+    };
+    a.api(
+        Method::Post,
+        &format!("/workspaces/{workspace_id}/channels"),
+        &[],
+        Some(&proto::api::CreateChannel { name, kind }),
+        None,
+    )
+    .await
+    .map_err(err)
+}
+
+#[tauri::command]
+async fn browse_channels(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+) -> R<Vec<Conversation>> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let list: proto::api::ConversationList = a
+        .api(
+            Method::Get,
+            &format!("/workspaces/{workspace_id}/channels"),
+            &[],
+            None::<&()>,
+            None,
+        )
+        .await
+        .map_err(err)?;
+    Ok(list.conversations)
+}
+
+#[tauri::command]
+async fn join_channel(host: State<'_, Host>, account_id: Uuid, conversation_id: Uuid) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let _: serde_json::Value = a
+        .api(
+            Method::Post,
+            &format!("/conversations/{conversation_id}/join"),
+            &[],
+            None::<&()>,
+            None,
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn leave_channel(host: State<'_, Host>, account_id: Uuid, conversation_id: Uuid) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let _: serde_json::Value = a
+        .api(
+            Method::Post,
+            &format!("/conversations/{conversation_id}/leave"),
+            &[],
+            None::<&()>,
+            None,
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn workspace_members(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+) -> R<Vec<Member>> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .store
+        .members(workspace_id)
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn open_dm(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    user_ids: Vec<Uuid>,
+) -> R<Conversation> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.api(
+        Method::Post,
+        &format!("/workspaces/{workspace_id}/dms"),
+        &[],
+        Some(&proto::api::OpenDm { user_ids }),
+        None,
+    )
+    .await
+    .map_err(err)
 }
