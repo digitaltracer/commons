@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 157978b435dead3c43d15c35fbdbaa0ac7ef32e9df95861f707be7e539f28a2a # shrinks to acts = [Post { who: 0, conv: 0 }, Revoke { who: 0, conv: 3 }, Sync { who: 1 }, Revoke { who: 0, conv: 0 }, Post { who: 2, conv: 2 }, Remove { who: 1 }, Readd { who: 1 }, QueueSend { who: 2, conv: 0 }, Prune, Readd { who: 2 }]
+cc 96f85375b6787d2058930018040dd771e6386195ebcf30cb9e7a06222e94e260 # shrinks to acts = [Remove { who: 1 }, Sync { who: 2 }, Post { who: 0, conv: 0 }, Post { who: 0, conv: 0 }, Promote { who: 1 }, Online { who: 0 }, Post { who: 1, conv: 3 }, Post { who: 1, conv: 1 }, Offline { who: 0 }, Readd { who: 1 }]
+cc 1b0b132f7291be360bec965fe5e8d301633e6bf9f6987777dd42c54b76969ff4 # shrinks to acts = [Post { who: 0, conv: 0 }, Post { who: 0, conv: 0 }, Offline { who: 0 }, Revoke { who: 0, conv: 0 }, Post { who: 0, conv: 2 }, Demote { who: 1 }, Offline { who: 2 }, Sync { who: 0 }, Grant { who: 0, conv: 0 }, Grant { who: 2, conv: 3 }]

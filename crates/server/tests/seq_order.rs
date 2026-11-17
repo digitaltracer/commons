@@ -110,11 +110,11 @@ async fn reader_never_sees_k_plus_1_before_k() {
                     cursor = *last;
                 }
                 observations += 1;
-                if observations.is_multiple_of(7) {
-                    cursor = (cursor - rand::thread_rng().gen_range(0..20)).max(0);
-                }
                 if finished {
                     return cursor;
+                }
+                if observations.is_multiple_of(7) {
+                    cursor = (cursor - rand::thread_rng().gen_range(0..20)).max(0);
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
