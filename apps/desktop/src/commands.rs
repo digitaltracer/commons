@@ -26,6 +26,10 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         move_window,
         unsubscribe_window,
         send_message,
+        edit_message,
+        delete_message,
+        toggle_reaction,
+        mark_read,
         retry_send,
         discard_send,
         set_focus,
@@ -299,4 +303,59 @@ async fn open_dm(
     )
     .await
     .map_err(err)
+}
+
+#[tauri::command]
+fn edit_message(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    message_id: Uuid,
+    base_revision: i64,
+    body: String,
+) -> R<Uuid> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let id = resolve(&a, message_id)?;
+    a.edit_message(conversation_id, id, base_revision, body)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn delete_message(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    message_id: Uuid,
+) -> R<Uuid> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let id = resolve(&a, message_id)?;
+    a.delete_message(conversation_id, id).map_err(err)
+}
+
+#[tauri::command]
+fn toggle_reaction(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    message_id: Uuid,
+    emoji: String,
+) -> R<Uuid> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let id = resolve(&a, message_id)?;
+    a.toggle_reaction(conversation_id, id, emoji).map_err(err)
+}
+
+#[tauri::command]
+async fn mark_read(host: State<'_, Host>, account_id: Uuid, conversation_id: Uuid) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.mark_read(conversation_id).await.map_err(err)
+}
+
+/// Views key messages by client id; commands need the server id.
+fn resolve(a: &client_core::Account, key: Uuid) -> R<Uuid> {
+    a.store
+        .message_by_client_id(key)
+        .map_err(err)?
+        .map(|m| m.id)
+        .ok_or_else(|| "that message has not been sent yet".to_string())
 }

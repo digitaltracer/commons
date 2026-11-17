@@ -20,11 +20,22 @@ pub struct Host {
     pub spike: Option<spike::Spike>,
 }
 
-struct LogNotifier;
+/// OS notifications. macOS applies the user's Focus (do-not-disturb) setting to them.
+struct OsNotifier(tauri::AppHandle);
 
-impl Notifier for LogNotifier {
-    fn show(&self, _: uuid::Uuid, title: &str, _: &str, _: &proto::model::Notification) {
-        tracing::info!(title, "notification");
+impl Notifier for OsNotifier {
+    fn show(&self, _: uuid::Uuid, title: &str, body: &str, _: &proto::model::Notification) {
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(e) = self
+            .0
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+        {
+            tracing::warn!(error = %e, "notification failed");
+        }
     }
 }
 
@@ -36,6 +47,7 @@ fn main() {
         .init();
     let spike_mode = std::env::var("COMMONS_SPIKE").is_ok_and(|v| v == "1");
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let runtime = tokio::runtime::Runtime::new()?;
             let handle = runtime.handle().clone();
@@ -54,7 +66,7 @@ fn main() {
                     chans.retain(|c| c.send(ev.clone()).is_ok());
                 }
             });
-            let notifier: Arc<dyn Notifier> = Arc::new(LogNotifier);
+            let notifier: Arc<dyn Notifier> = Arc::new(OsNotifier(app.handle().clone()));
             let _guard = handle.enter();
             let core = Core::open(
                 &data_dir,

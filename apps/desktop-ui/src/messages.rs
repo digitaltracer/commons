@@ -19,6 +19,23 @@ fn time_label(ms: i64) -> String {
     format!("{:02}:{:02}", d.get_hours(), d.get_minutes())
 }
 
+thread_local! {
+    static LAST_READ: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Marks the conversation read at most once a second while the reader is at the bottom.
+fn mark_read_soon(account_id: Uuid, conversation_id: Uuid) {
+    let now = ipc::now_ms();
+    if now - LAST_READ.with(|l| l.get()) < 1000.0 {
+        return;
+    }
+    LAST_READ.with(|l| l.set(now));
+    ipc::command(
+        "mark_read",
+        json!({"accountId": account_id, "conversationId": conversation_id}),
+    );
+}
+
 #[component]
 pub fn MessageList(
     account_id: Uuid,
@@ -80,6 +97,9 @@ pub fn MessageList(
         };
         match applied {
             Applied::Ack(revision) => {
+                if pinned.get_value() && thread_root_id.is_none() {
+                    mark_read_soon(account_id, conversation_id);
+                }
                 rows.set(new_rows);
                 total.set(new_total);
                 after_render();
