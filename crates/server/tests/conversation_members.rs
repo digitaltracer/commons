@@ -132,6 +132,27 @@ async fn people_added_to_a_group_dm_see_its_history_and_the_key_follows() {
         ids(&list),
         sorted(vec![alice.id, bob.id, carol.id, dave.id])
     );
+    let replay = ok(
+        &srv,
+        Method::GET,
+        &alice,
+        &format!("/sync/workspaces/{}?since=0", ws.id),
+        None,
+    )
+    .await;
+    let added = replay["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["body"]["type"] == "member_added")
+        .unwrap();
+    let in_event: Vec<Uuid> =
+        serde_json::from_value(added["body"]["conversation"]["dm_user_ids"].clone()).unwrap();
+    assert_eq!(
+        sorted(in_event),
+        sorted(vec![alice.id, bob.id, carol.id, dave.id]),
+        "the event carries the new member set, so clients retitle the DM"
+    );
     let history = ok(
         &srv,
         Method::GET,

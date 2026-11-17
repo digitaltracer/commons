@@ -512,6 +512,12 @@ pub async fn add_member(
             ));
         }
     }
+    let mut c = c;
+    if c.kind == ConversationKind::GroupDm && !c.dm_user_ids.contains(&req.user_id) {
+        // The event carries the conversation as it is after the add, so clients retitle it.
+        c.dm_user_ids.push(req.user_id);
+        c.dm_user_ids.sort();
+    }
     if let Some(e) = grant(&mut tx, &c, req.user_id, AccessVia::Membership).await? {
         sync::append(&mut tx, c.workspace_id, vec![e]).await?;
         rekey_group_dm(&mut tx, c.id).await?;
