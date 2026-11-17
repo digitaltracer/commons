@@ -77,7 +77,7 @@ async fn add_account(
     host.core
         .add_account(&server_url, &email, &password, display_name.as_deref())
         .await
-        .map_err(err)
+        .map_err(refused)
 }
 
 #[tauri::command]
@@ -92,6 +92,10 @@ fn subscribe_window(
     on_batch: Channel<WindowBatch>,
 ) -> R<u64> {
     let account = host.core.account(spec.account_id).map_err(err)?;
+    let spec = WindowSpec {
+        thread_root_id: resolve_root(&account, spec.thread_root_id)?,
+        ..spec
+    };
     Ok(account.subscribe_window(spec, Box::new(move |b| on_batch.send(b).is_ok())))
 }
 
@@ -118,6 +122,10 @@ fn reset_window(host: State<'_, Host>, account_id: Uuid, sub_id: u64) -> R<()> {
 #[tauri::command]
 fn move_window(host: State<'_, Host>, account_id: Uuid, sub_id: u64, spec: WindowSpec) -> R<()> {
     let a = host.core.account(account_id).map_err(err)?;
+    let spec = WindowSpec {
+        thread_root_id: resolve_root(&a, spec.thread_root_id)?,
+        ..spec
+    };
     a.windows.update(sub_id, spec, &*a.0);
     Ok(())
 }
@@ -141,17 +149,16 @@ fn send_message(
     thread_root_id: Option<Uuid>,
     mentions: Option<Vec<Entity>>,
 ) -> R<Uuid> {
-    host.core
-        .account(account_id)
-        .map_err(err)?
-        .send_message_with(
-            conversation_id,
-            body,
-            thread_root_id,
-            vec![],
-            mentions.unwrap_or_default(),
-        )
-        .map_err(err)
+    let a = host.core.account(account_id).map_err(err)?;
+    let thread_root_id = resolve_root(&a, thread_root_id)?;
+    a.send_message_with(
+        conversation_id,
+        body,
+        thread_root_id,
+        vec![],
+        mentions.unwrap_or_default(),
+    )
+    .map_err(err)
 }
 
 /// Picks a file, uploads it and queues a message carrying it. `None` when the picker was
@@ -177,6 +184,7 @@ async fn attach_file(
         return Ok(None);
     };
     let path = picked.into_path().map_err(err)?;
+    let thread_root_id = resolve_root(&a, thread_root_id)?;
     a.attach_file(conversation_id, thread_root_id, &path)
         .await
         .map(Some)
@@ -271,7 +279,7 @@ async fn create_workspace(host: State<'_, Host>, account_id: Uuid, name: String)
             None,
         )
         .await
-        .map_err(err)?;
+        .map_err(refusal)?;
     // The new workspace arrives on the user stream.
     Ok(())
 }
@@ -322,7 +330,7 @@ async fn browse_channels(
             None,
         )
         .await
-        .map_err(err)?;
+        .map_err(refusal)?;
     Ok(list.conversations)
 }
 
@@ -338,7 +346,7 @@ async fn join_channel(host: State<'_, Host>, account_id: Uuid, conversation_id: 
             None,
         )
         .await
-        .map_err(err)?;
+        .map_err(refusal)?;
     Ok(())
 }
 
@@ -355,6 +363,18 @@ fn refusal(e: client_core::account::SyncError) -> String {
             client_core::transport::TransportError::Status { body, .. },
         ) if body["message"].is_string() => body["message"].as_str().unwrap_or_default().into(),
         other => other.to_string(),
+    }
+}
+
+/// [`refusal`] for core calls that return `anyhow` errors.
+fn refused(e: anyhow::Error) -> String {
+    match e.downcast_ref::<client_core::transport::TransportError>() {
+        Some(client_core::transport::TransportError::Status { body, .. })
+            if body["message"].is_string() =>
+        {
+            body["message"].as_str().unwrap_or_default().into()
+        }
+        _ => e.to_string(),
     }
 }
 
@@ -451,7 +471,7 @@ async fn sign_in_again(host: State<'_, Host>, account_id: Uuid, password: String
     host.core
         .sign_in_again(account_id, &password)
         .await
-        .map_err(err)
+        .map_err(refused)
 }
 
 #[tauri::command]
@@ -545,6 +565,11 @@ fn toggle_reaction(
 async fn mark_read(host: State<'_, Host>, account_id: Uuid, conversation_id: Uuid) -> R<()> {
     let a = host.core.account(account_id).map_err(err)?;
     a.mark_read(conversation_id).await.map_err(err)
+}
+
+/// A thread root as the UI names it (a client id) to the server id.
+fn resolve_root(a: &client_core::Account, root: Option<Uuid>) -> R<Option<Uuid>> {
+    root.map(|r| resolve(a, r)).transpose()
 }
 
 /// Views key messages by client id; commands need the server id.
