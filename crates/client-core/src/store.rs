@@ -312,6 +312,8 @@ impl Storage for SqliteStore {
                     )?;
                 }
                 Op::SetMeta(k, v) => {
+                    // Preferences decide which conversations show as muted.
+                    ch.sidebar |= k == "preferences";
                     tx.execute(
                         "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
                         [k, v],
@@ -528,6 +530,7 @@ impl Storage for SqliteStore {
                         ],
                     )?;
                     ch.conversations.insert(item.conversation_id);
+                    ch.sidebar = true;
                 }
                 Op::OutboxRemove(id) => {
                     let conv: Option<String> = tx
@@ -540,6 +543,7 @@ impl Storage for SqliteStore {
                     tx.execute("DELETE FROM outbox WHERE id = ?1", [id.to_string()])?;
                     if let Some(c) = conv {
                         ch.conversations.insert(uuid(c)?);
+                        ch.sidebar = true;
                     }
                 }
                 Op::DraftPut(d) => {

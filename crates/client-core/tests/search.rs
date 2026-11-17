@@ -51,7 +51,7 @@ async fn search_hits_become_titled_views() {
 
     let b = account_with_store(&srv, &bob, memory());
     b.sync_once().await.unwrap();
-    let hits = b.search(ws.id, "kumquat").await.unwrap();
+    let hits = b.search(ws.id, "kumquat", 0).await.unwrap();
     let mut seen: Vec<(String, bool)> = hits
         .iter()
         .map(|h| (h.conversation_title.clone(), h.joined))

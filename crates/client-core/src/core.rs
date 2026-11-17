@@ -250,6 +250,31 @@ impl Core {
         Ok(id)
     }
 
+    /// Signs an account whose session ended back in, keeping its cache and outbox.
+    pub async fn sign_in_again(&self, account_id: Uuid, password: &str) -> anyhow::Result<()> {
+        let account = self.account(account_id)?;
+        let transport = (self.transports)(&account.server_url);
+        let session: SessionResponse = call(
+            &*transport,
+            Method::Post,
+            "/auth/login",
+            &[],
+            Some(&LoginRequest {
+                email: account.user.email.clone(),
+                password: password.into(),
+            }),
+            None,
+            None,
+        )
+        .await?;
+        if session.user.id != account.user.id {
+            anyhow::bail!("that password signed in a different user");
+        }
+        self.secrets.set(account_id, &session.token)?;
+        account.resume_session(session.token);
+        Ok(())
+    }
+
     /// Hosts an account built elsewhere (the M0 spike's local accounts). Not saved.
     pub fn attach(&self, account: Account) -> anyhow::Result<()> {
         self.accounts

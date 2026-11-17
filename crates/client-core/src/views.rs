@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use proto::api::{SNIPPET_START, SNIPPET_STOP, SearchHit};
-use proto::model::{Conversation, ConversationKind, FileInfo, Message};
+use proto::model::{Conversation, ConversationKind, FileInfo, Message, Preferences};
 use proto::view::{
     AttachmentView, ConversationView, MessageView, SearchHitView, SendState, SnippetPart,
     WorkspaceView,
@@ -195,10 +195,30 @@ pub fn search_hit_view(
         file_name: h.file_name.clone(),
         snippet: snippet_parts(&h.snippet),
         created_at_ms: h.created_at_ms,
+        author_id: h.author_id,
+        author_name: h
+            .author_id
+            .map(|a| names.get(&a).cloned().unwrap_or_else(|| "Unknown".into())),
+        in_thread: h.thread_root_id.is_some(),
     })
 }
 
+/// The user's notification preferences as last synced; defaults before the first sync.
+pub fn preferences(store: &dyn Storage) -> anyhow::Result<Preferences> {
+    Ok(store
+        .meta("preferences")?
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default())
+}
+
 pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<WorkspaceView>> {
+    let prefs = preferences(store)?;
+    let mut pending: HashMap<Uuid, u32> = HashMap::new();
+    for o in store.outbox()? {
+        if matches!(o.kind, OutboxKind::Send { .. }) && o.state == OutboxState::Pending {
+            *pending.entry(o.conversation_id).or_default() += 1;
+        }
+    }
     let mut out = vec![];
     for (w, _) in store.workspaces()? {
         let members = store.members(w.id)?;
@@ -220,6 +240,9 @@ pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<Work
                 title,
                 unread,
                 mentions,
+                muted: prefs.muted.contains(&c.id),
+                pending: pending.get(&c.id).copied().unwrap_or(0),
+                peer_ids: c.dm_user_ids.iter().copied().filter(|u| *u != me).collect(),
             });
         }
         out.push(WorkspaceView {

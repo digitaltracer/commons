@@ -9,7 +9,7 @@ use proto::events::{
     ClientFrame, ServerFrame, StreamCursor, UserEvent, UserEventBody, UserReplay, UserSnapshot,
     WorkspaceEvent, WorkspaceReplay,
 };
-use proto::model::{Message, Notification, User};
+use proto::model::{Entity, Member, Message, Notification, Preferences, User};
 use proto::view::{AccountView, ConnectionState, DraftReason, DraftView, MessageView};
 use proto::window::WindowSpec;
 use tokio::sync::{Notify, mpsc};
@@ -26,6 +26,7 @@ use crate::window::{RowSource, Sink, WindowServer};
 /// Sends that cannot be delivered for this long give up and surface as failed.
 pub const OUTBOX_GIVE_UP: Duration = Duration::from_secs(7 * 24 * 3600);
 const BACKFILL_PAGE: i64 = 100;
+const RECENT_EMOJI: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct AccountConfig {
@@ -90,6 +91,9 @@ pub struct Inner {
     pub user: User,
     transport: Arc<dyn Transport>,
     token: RwLock<Option<String>>,
+    /// When the sync loop next tries to reconnect, while it waits.
+    reconnect_at: Mutex<Option<i64>>,
+    wake_sync: Notify,
     pub store: Arc<dyn Storage>,
     pub windows: WindowServer,
     notifier: Arc<dyn Notifier>,
@@ -149,6 +153,8 @@ impl Account {
             user: config.user,
             transport,
             token: RwLock::new(token),
+            reconnect_at: Mutex::new(None),
+            wake_sync: Notify::new(),
             store,
             windows: WindowServer::default(),
             notifier,
@@ -228,6 +234,7 @@ impl Account {
             display_name: self.user.display_name.clone(),
             user_id: self.user.id,
             connection: self.connection(),
+            reconnect_at_ms: self.reconnect_at.lock().ok().and_then(|r| *r),
             workspaces: views::workspace_views(&*self.store, self.user.id)?,
         })
     }
@@ -696,6 +703,7 @@ impl Account {
             *s = Some(tx);
         }
         self.set_connection(ConnectionState::Online);
+        self.load_presence().await;
         let result = loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => break Ok(()),
@@ -722,7 +730,42 @@ impl Account {
         if let Ok(mut s) = self.socket_tx.lock() {
             *s = None;
         }
+        if let Ok(mut set) = self.online.lock() {
+            set.clear();
+        }
+        (self.events)(self.id, AccountEvent::Presence { online: vec![] });
         result
+    }
+
+    /// Seeds presence with who is online now; socket frames keep it current from here.
+    async fn load_presence(&self) {
+        let Ok(workspaces) = self.store.workspaces() else {
+            return;
+        };
+        for (w, _) in workspaces {
+            let path = format!("/workspaces/{}/presence", w.id);
+            if let Ok(users) = self
+                .api::<Vec<Uuid>>(Method::Get, &path, &[], None::<&()>, None)
+                .await
+                && let Ok(mut set) = self.online.lock()
+            {
+                set.extend(users);
+            }
+        }
+        (self.events)(
+            self.id,
+            AccountEvent::Presence {
+                online: self.online(),
+            },
+        );
+    }
+
+    /// Users this account sees online, as of the open socket.
+    pub fn online(&self) -> Vec<Uuid> {
+        self.online
+            .lock()
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Runs sync until cancelled: HTTPS catch-up, then the socket, reconnecting with backoff.
@@ -755,12 +798,39 @@ impl Account {
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
             }
+            self.set_reconnect_at(Some(now_ms() + backoff.as_millis() as i64));
             self.set_connection(ConnectionState::Offline);
             tokio::select! {
                 _ = self.cancel.cancelled() => return,
                 _ = tokio::time::sleep(backoff) => {}
+                _ = self.wake_sync.notified() => {}
             }
+            self.set_reconnect_at(None);
         }
+    }
+
+    fn set_reconnect_at(&self, at: Option<i64>) {
+        if let Ok(mut r) = self.reconnect_at.lock() {
+            *r = at;
+        }
+        (self.events)(self.id, AccountEvent::Sidebar);
+    }
+
+    /// Skips the rest of the reconnect wait.
+    pub fn reconnect_now(&self) {
+        self.wake_sync.notify_one();
+    }
+
+    /// Replaces a revoked session with a new one and restarts sync if it had stopped.
+    pub fn resume_session(&self, token: String) {
+        if let Ok(mut t) = self.token.write() {
+            *t = Some(token);
+        }
+        if self.connection() == ConnectionState::SignedOut {
+            self.set_connection(ConnectionState::Connecting);
+            tokio::spawn(self.clone().run_sync());
+        }
+        self.wake_outbox.notify_one();
     }
 
     async fn run_backfill_loop(self) {
@@ -973,7 +1043,24 @@ impl Account {
         thread_root_id: Option<Uuid>,
         attachments: Vec<Uuid>,
     ) -> anyhow::Result<Uuid> {
-        let entities = mentions(&*self.store, conversation_id, &body)?;
+        self.send_message_with(conversation_id, body, thread_root_id, attachments, vec![])
+    }
+
+    /// Sends with mentions the user picked from autocomplete. Those win over names parsed
+    /// from the text, so two members with the same name are told apart.
+    pub fn send_message_with(
+        &self,
+        conversation_id: Uuid,
+        body: String,
+        thread_root_id: Option<Uuid>,
+        attachments: Vec<Uuid>,
+        picked: Vec<Entity>,
+    ) -> anyhow::Result<Uuid> {
+        let entities = merge_mentions(
+            &body,
+            picked,
+            mentions(&*self.store, conversation_id, &body)?,
+        );
         self.queue(
             conversation_id,
             OutboxKind::Send {
@@ -1020,6 +1107,9 @@ impl Account {
                 .iter()
                 .any(|r| r.emoji == emoji && r.user_ids.contains(&self.user.id))
         });
+        if !mine {
+            self.remember_emoji(&emoji)?;
+        }
         self.queue(
             conversation_id,
             OutboxKind::React {
@@ -1050,6 +1140,115 @@ impl Account {
             )
             .await?;
         Ok(())
+    }
+
+    /// Emoji this user reacted with lately, newest first.
+    pub fn recent_emoji(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .store
+            .meta("recent_emoji")?
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default())
+    }
+
+    pub fn remember_emoji(&self, emoji: &str) -> anyhow::Result<()> {
+        let mut recent = self.recent_emoji()?;
+        recent.retain(|e| e != emoji);
+        recent.insert(0, emoji.to_string());
+        recent.truncate(RECENT_EMOJI);
+        self.commit(vec![Op::SetMeta(
+            "recent_emoji".into(),
+            serde_json::to_string(&recent)?,
+        )])?;
+        Ok(())
+    }
+
+    // ---- members and preferences ----
+
+    /// Current members of a conversation, from the server.
+    pub async fn conversation_members(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Vec<Member>, SyncError> {
+        let list: MemberList = self
+            .api(
+                Method::Get,
+                &format!("/conversations/{conversation_id}/members"),
+                &[],
+                None::<&()>,
+                None,
+            )
+            .await?;
+        Ok(list.members)
+    }
+
+    pub async fn add_member(&self, conversation_id: Uuid, user_id: Uuid) -> Result<(), SyncError> {
+        let _: serde_json::Value = self
+            .api(
+                Method::Post,
+                &format!("/conversations/{conversation_id}/members"),
+                &[],
+                Some(&proto::api::AddConversationMember { user_id }),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Removes someone else; the server checks the caller's role.
+    pub async fn remove_member(
+        &self,
+        conversation_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<(), SyncError> {
+        let _: serde_json::Value = self
+            .api(
+                Method::Delete,
+                &format!("/conversations/{conversation_id}/members/{user_id}"),
+                &[],
+                None::<&()>,
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn leave(&self, conversation_id: Uuid) -> Result<(), SyncError> {
+        let _: serde_json::Value = self
+            .api(
+                Method::Post,
+                &format!("/conversations/{conversation_id}/leave"),
+                &[],
+                None::<&()>,
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub fn preferences(&self) -> anyhow::Result<Preferences> {
+        views::preferences(&*self.store)
+    }
+
+    /// Saves preferences on the server, which the notify module reads, then caches them.
+    pub async fn set_preferences(&self, prefs: Preferences) -> Result<(), SyncError> {
+        let _: serde_json::Value = self
+            .api(Method::Put, "/me/preferences", &[], Some(&prefs), None)
+            .await?;
+        self.commit(vec![Op::SetMeta(
+            "preferences".into(),
+            serde_json::to_string(&prefs).map_err(anyhow::Error::from)?,
+        )])?;
+        Ok(())
+    }
+
+    pub async fn set_muted(&self, conversation_id: Uuid, muted: bool) -> Result<(), SyncError> {
+        let mut prefs = self.preferences()?;
+        prefs.muted.retain(|c| *c != conversation_id);
+        if muted {
+            prefs.muted.push(conversation_id);
+        }
+        self.set_preferences(prefs).await
     }
 
     pub fn retry(&self, id: Uuid) -> anyhow::Result<()> {
@@ -1108,12 +1307,13 @@ impl Account {
         &self,
         workspace_id: Uuid,
         query: &str,
+        offset: u32,
     ) -> Result<Vec<proto::view::SearchHitView>, SyncError> {
         let r: proto::api::SearchResults = self
             .api(
                 Method::Get,
                 &format!("/workspaces/{workspace_id}/search"),
-                &[("q", query.to_string())],
+                &[("q", query.to_string()), ("offset", offset.to_string())],
                 None::<&()>,
                 None,
             )
@@ -1333,6 +1533,32 @@ pub fn mentions(
         _ => 0,
     });
     Ok(out)
+}
+
+/// Picked mentions that point at an `@` in the body, plus parsed ones that don't overlap them.
+pub fn merge_mentions(body: &str, picked: Vec<Entity>, parsed: Vec<Entity>) -> Vec<Entity> {
+    let span = |e: &Entity| match e {
+        Entity::Mention { start, end, .. } => Some((*start as usize, *end as usize)),
+        _ => None,
+    };
+    let mut out: Vec<Entity> = picked
+        .into_iter()
+        .filter(|e| {
+            span(e).is_some_and(|(s, end)| {
+                s < end && body.get(s..end).is_some_and(|t| t.starts_with('@'))
+            })
+        })
+        .collect();
+    let taken: Vec<(usize, usize)> = out.iter().filter_map(span).collect();
+    for e in parsed {
+        if let Some((s, end)) = span(&e)
+            && taken.iter().all(|(ts, te)| end <= *ts || s >= *te)
+        {
+            out.push(e);
+        }
+    }
+    out.sort_by_key(|e| span(e).map_or(0, |(s, _)| s));
+    out
 }
 
 /// The core's presentation rule: notifications for the conversation in focus are not shown.

@@ -50,6 +50,15 @@ pub struct ConversationView {
     pub title: String,
     pub unread: u32,
     pub mentions: u32,
+    /// Muted in the user's notification preferences.
+    #[serde(default)]
+    pub muted: bool,
+    /// Sends waiting in the outbox.
+    #[serde(default)]
+    pub pending: u32,
+    /// The other people in a DM or group DM; empty for channels.
+    #[serde(default)]
+    pub peer_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +86,9 @@ pub struct AccountView {
     pub display_name: String,
     pub user_id: Uuid,
     pub connection: ConnectionState,
+    /// When the next reconnect attempt is due, while offline.
+    #[serde(default)]
+    pub reconnect_at_ms: Option<i64>,
     pub workspaces: Vec<WorkspaceView>,
 }
 
@@ -124,6 +136,13 @@ pub struct SearchHitView {
     pub file_name: Option<String>,
     pub snippet: Vec<SnippetPart>,
     pub created_at_ms: i64,
+    #[serde(default)]
+    pub author_id: Option<Uuid>,
+    #[serde(default)]
+    pub author_name: Option<String>,
+    /// The hit is a reply inside a thread.
+    #[serde(default)]
+    pub in_thread: bool,
 }
 
 /// Low-volume app events pushed over the app channel. Message rows travel only in windows.
