@@ -1,0 +1,52 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "commonsd: the Commons server (a modular monolith)."
+
+[[bin]]
+name = "commonsd"
+path = "src/bin/commonsd.rs"
+
+[features]
+# In-process server and testcontainers Postgres for integration tests.
+testing = ["dep:testcontainers", "dep:testcontainers-modules"]
+
+[dependencies]
+proto = { workspace = true, features = ["openapi"] }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+axum = { version = "0.8", features = ["ws", "macros"] }
+sqlx-core = { version = "0.8.6", features = ["_rt-tokio", "migrate", "json", "uuid", "time"] }
+sqlx-postgres = { version = "0.8.6", features = ["migrate", "json", "uuid", "time"] }
+time = "0.3"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+governor = "0.10"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
+utoipa = { version = "6", features = ["uuid", "axum_extras"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+tokio-util = "0.7"
+testcontainers = { version = "0.27", optional = true }
+testcontainers-modules = { version = "0.15", features = ["postgres"], optional = true }
+
+[dev-dependencies]
+server = { path = ".", features = ["testing"] }
+tokio-tungstenite = "0.30"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+proptest = "1"
+
+[lints]
+workspace = true

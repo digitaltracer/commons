@@ -1,0 +1,321 @@
+//! Email/password accounts and opaque, revocable sessions (decision 14).
+use crate::sqlx;
+use std::num::NonZeroU32;
+
+use argon2::Argon2;
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use axum::extract::{FromRequestParts, State};
+use axum::http::StatusCode;
+use axum::http::request::Parts;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use base64::Engine;
+use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+use proto::api::{LoginRequest, RegisterRequest, ResetConfirm, ResetRequest, SessionResponse};
+use proto::model::User;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::AppState;
+use crate::error::{ApiError, ApiResult};
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/auth/register", post(register))
+        .route("/auth/login", post(login))
+        .route("/auth/logout", post(logout))
+        .route("/auth/reset", post(reset_request))
+        .route("/auth/reset/confirm", post(reset_confirm))
+        .route("/me", get(me))
+}
+
+/// Per-email attempt limiter for login and reset.
+pub struct Limiter(DefaultKeyedRateLimiter<String>);
+
+impl Limiter {
+    pub fn new(per_minute: u32) -> Self {
+        let n = NonZeroU32::new(per_minute.max(1)).unwrap_or(NonZeroU32::MIN);
+        Limiter(RateLimiter::keyed(Quota::per_minute(n)))
+    }
+    pub fn check(&self, key: &str) -> ApiResult<()> {
+        self.0
+            .check_key(&key.to_string())
+            .map_err(|_| ApiError::RateLimited)
+    }
+}
+
+/// The signed-in caller, from `Authorization: Bearer <token>`.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthUser {
+    pub user_id: Uuid,
+}
+
+impl FromRequestParts<AppState> for AuthUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(ApiError::Unauthorized)?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or(ApiError::Unauthorized)?;
+        let user_id = session_user(&state.pool, token)
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
+        Ok(AuthUser { user_id })
+    }
+}
+
+pub async fn session_user(pool: &sqlx::PgPool, token: &str) -> ApiResult<Option<Uuid>> {
+    let hash = hash_token(token);
+    let row: Option<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM sessions WHERE token_hash = $1 AND revoked_at IS NULL")
+            .bind(&hash[..])
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.0))
+}
+
+pub fn new_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn hash_token(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+fn hash_password(password: &str) -> ApiResult<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("hash: {e}")))
+}
+
+fn verify_password(password: &str, hash: &str) -> bool {
+    PasswordHash::new(hash)
+        .map(|h| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &h)
+                .is_ok()
+        })
+        .unwrap_or(false)
+}
+
+fn normalise_email(email: &str) -> ApiResult<String> {
+    let e = email.trim().to_lowercase();
+    if e.len() < 3 || !e.contains('@') || e.len() > 254 {
+        return Err(ApiError::BadRequest("invalid email".into()));
+    }
+    Ok(e)
+}
+
+fn check_password(p: &str) -> ApiResult<()> {
+    if p.chars().count() < 8 || p.len() > 1024 {
+        return Err(ApiError::BadRequest(
+            "password must be at least 8 characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn create_session(pool: &sqlx::PgPool, user_id: Uuid) -> ApiResult<String> {
+    let token = new_token();
+    sqlx::query("INSERT INTO sessions (token_hash, user_id) VALUES ($1, $2)")
+        .bind(&hash_token(&token)[..])
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(token)
+}
+
+#[utoipa::path(post, path = "/v1/auth/register", request_body = RegisterRequest,
+    responses((status = 200, body = SessionResponse)))]
+pub async fn register(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterRequest>,
+) -> ApiResult<Json<SessionResponse>> {
+    let email = normalise_email(&req.email)?;
+    check_password(&req.password)?;
+    let name = req.display_name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err(ApiError::BadRequest("display name is required".into()));
+    }
+    let password = req.password.clone();
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))??;
+    let id = Uuid::now_v7();
+    let inserted = sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (email) DO NOTHING",
+    )
+    .bind(id)
+    .bind(&email)
+    .bind(&hash)
+    .bind(name)
+    .execute(&state.pool)
+    .await?;
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError::Conflict(serde_json::json!({
+            "error": "email_taken", "message": "an account with this email exists"
+        })));
+    }
+    let token = create_session(&state.pool, id).await?;
+    Ok(Json(SessionResponse {
+        token,
+        user: User {
+            id,
+            email,
+            display_name: name.to_string(),
+        },
+    }))
+}
+
+#[utoipa::path(post, path = "/v1/auth/login", request_body = LoginRequest,
+    responses((status = 200, body = SessionResponse), (status = 401), (status = 429)))]
+pub async fn login(
+    State(state): State<AppState>,
+    Json(req): Json<LoginRequest>,
+) -> ApiResult<Json<SessionResponse>> {
+    let email = normalise_email(&req.email)?;
+    state.limiter.check(&format!("login:{email}"))?;
+    let row: Option<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, password_hash, display_name FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((id, hash, display_name)) = row else {
+        return Err(ApiError::Unauthorized);
+    };
+    let password = req.password.clone();
+    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    if !ok {
+        return Err(ApiError::Unauthorized);
+    }
+    let token = create_session(&state.pool, id).await?;
+    Ok(Json(SessionResponse {
+        token,
+        user: User {
+            id,
+            email,
+            display_name,
+        },
+    }))
+}
+
+#[utoipa::path(post, path = "/v1/auth/logout", responses((status = 204)))]
+pub async fn logout(
+    State(state): State<AppState>,
+    parts: axum::http::HeaderMap,
+) -> ApiResult<StatusCode> {
+    if let Some(token) = parts
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        sqlx::query("UPDATE sessions SET revoked_at = now() WHERE token_hash = $1")
+            .bind(&hash_token(token)[..])
+            .execute(&state.pool)
+            .await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(get, path = "/v1/me", responses((status = 200, body = User)))]
+pub async fn me(State(state): State<AppState>, auth: AuthUser) -> ApiResult<Json<User>> {
+    let (id, email, display_name): (Uuid, String, String) =
+        sqlx::query_as("SELECT id, email, display_name FROM users WHERE id = $1")
+            .bind(auth.user_id)
+            .fetch_one(&state.pool)
+            .await?;
+    Ok(Json(User {
+        id,
+        email,
+        display_name,
+    }))
+}
+
+/// Always answers 202 so the endpoint does not reveal which emails have accounts.
+#[utoipa::path(post, path = "/v1/auth/reset", request_body = ResetRequest, responses((status = 202)))]
+pub async fn reset_request(
+    State(state): State<AppState>,
+    Json(req): Json<ResetRequest>,
+) -> ApiResult<StatusCode> {
+    let email = normalise_email(&req.email)?;
+    state.limiter.check(&format!("reset:{email}"))?;
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(&state.pool)
+        .await?;
+    if let Some((user_id,)) = row {
+        let token = new_token();
+        sqlx::query(
+            "INSERT INTO password_resets (token_hash, user_id, expires_at)
+             VALUES ($1, $2, now() + interval '1 hour')",
+        )
+        .bind(&hash_token(&token)[..])
+        .bind(user_id)
+        .execute(&state.pool)
+        .await?;
+        let link = format!("{}/reset?token={token}", state.config.public_url);
+        let body = format!("Use this link within an hour to set a new password:\n\n{link}\n");
+        if let Err(e) = state
+            .mailer
+            .send(&email, "Reset your Commons password", &body)
+            .await
+        {
+            tracing::warn!(error = ?e, "reset mail failed");
+        }
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[utoipa::path(post, path = "/v1/auth/reset/confirm", request_body = ResetConfirm,
+    responses((status = 204), (status = 400)))]
+pub async fn reset_confirm(
+    State(state): State<AppState>,
+    Json(req): Json<ResetConfirm>,
+) -> ApiResult<StatusCode> {
+    check_password(&req.password)?;
+    state
+        .limiter
+        .check(&format!("reset-confirm:{}", req.token))?;
+    let mut tx = state.pool.begin().await?;
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "UPDATE password_resets SET used_at = now()
+         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id",
+    )
+    .bind(&hash_token(&req.token)[..])
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((user_id,)) = row else {
+        return Err(ApiError::BadRequest(
+            "reset link is invalid or expired".into(),
+        ));
+    };
+    let password = req.password.clone();
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))??;
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(hash)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
