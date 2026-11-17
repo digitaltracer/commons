@@ -5,6 +5,7 @@ mod app;
 mod ipc;
 mod markdown;
 mod messages;
+mod search;
 mod spike;
 
 fn main() {

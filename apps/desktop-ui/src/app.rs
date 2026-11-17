@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::ipc;
 use crate::messages::{Composer, MessageList};
+use crate::search::{Results, SearchBox, SearchResults};
 use crate::spike;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,9 +106,17 @@ pub fn App() -> impl IntoView {
                                 .and_then(|a| a.workspaces.iter().flat_map(|w| &w.conversations).find(|c| c.id == sel.conversation_id))
                                 .map(|c| c.title.clone())).unwrap_or_default();
                             let label = format!("Message {}", untrack(title));
+                            let workspace_id = untrack(|| sidebar.with(|s| s.accounts.iter()
+                                .find(|a| a.id == sel.account_id)
+                                .and_then(|a| a.workspaces.iter().find(|w| w.conversations.iter().any(|c| c.id == sel.conversation_id)))
+                                .map(|w| w.id)));
+                            let results = RwSignal::new(Results::Idle);
                             view! {
                                 <main class="conversation">
-                                    <header class="bar"><h1>{title}</h1></header>
+                                    <header class="bar"><h1>{title}</h1>
+                                        {workspace_id.map(|w| view! { <SearchBox account_id=sel.account_id workspace_id=w results=results /> })}
+                                    </header>
+                                    <SearchResults account_id=sel.account_id results=results selected=selected />
                                     <Drafts drafts=drafts selected=sel />
                                     <EditBar editing=editing account_id=sel.account_id conversation_id=sel.conversation_id />
                                     <MessageList account_id=sel.account_id conversation_id=sel.conversation_id

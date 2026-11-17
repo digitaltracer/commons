@@ -42,6 +42,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         leave_channel,
         workspace_members,
         open_dm,
+        search,
         ui_log,
         crate::spike::spike_config,
         crate::spike::spike_report,
@@ -341,6 +342,17 @@ async fn open_dm(
     )
     .await
     .map_err(err)
+}
+
+#[tauri::command]
+async fn search(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    query: String,
+) -> R<Vec<proto::view::SearchHitView>> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.search(workspace_id, &query).await.map_err(err)
 }
 
 #[tauri::command]
