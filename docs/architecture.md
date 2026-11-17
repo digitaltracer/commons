@@ -339,3 +339,58 @@ Scope changed during the build. The user stopped the work after step 3. Steps 4 
 - **Open questions for the user:**
   - Which memory measure does acceptance criterion 8 use, RSS or physical footprint?
   - The license is still open.
+
+## As built, steps 4–5 (2026-11-18)
+
+A second implementer built steps 4 and 5 on `f2e255a`. Before starting, I confirmed the stubs As built describes: `messages::check_attachments` refused every attachment, `attach_files` did nothing, the Attach button invoked a command that did not exist, and no `commons-file` protocol was registered.
+
+**Steps**
+- **Step 4, done.** Uploads stream into `object_store` (local disk by default, S3 when `COMMONS_S3_BUCKET` is set), capped by the per-file limit and the uploader's quota. Downloads are proxied through `commonsd` with an access check on every request. Thumbnails and text extraction (plain text, Markdown, source code, PDF) run as jobs through `jobs::handle`. The desktop serves attachments to the webview through `commons-file://`, and Attach uploads a file and sends it.
+  - Checks pass (`crates/server/tests/files.rs`, `upload_memory.rs`, `crates/client-core/tests/files.rs`):
+    - a member removed from the channel, or from the workspace, after one successful fetch gets 404 on the next request;
+    - a 1 GiB upload raised test-process RSS by 34 MB, which is the bounded multipart buffer (4 parts of 5 MB) plus the client, not the file size;
+    - a job whose worker died holding the lease is reclaimed after the lease expires (attempt 2) and completes;
+    - a failed PDF extraction leaves the download working.
+- **Step 5, done.** PostgreSQL full-text search over messages, file names and extracted text, through the `commons_search` configuration (`simple` plus `unaccent`) with GIN indexes. One SQL statement applies the access filter, then ranks the hits and builds snippets for the returned page. The core turns hits into view models with marked snippets, and the desktop has a search box per workspace.
+  - Checks pass (`crates/server/tests/search.rs`, `crates/client-core/tests/search.rs`). Private-channel text (messages, file names, file text) never reaches:
+    - a member who isn't in the channel;
+    - a guest;
+    - someone removed from the channel or the workspace;
+    - an admin after a downgrade.
+    Guests see only channels they joined, and new members see earlier history.
+  - Benchmark (`search_bench.rs`, ADR 0003): 1,000,000 messages and 20,000 files. With one searcher at a time, p95 is **257 ms**, so the 500 ms Tantivy trigger does not fire. With eight concurrent searchers, p95 is **528 ms**. Common words are the slow case.
+
+**Deviations, and why**
+- None from the decisions.
+- `SearchHit` gained `conversation_name` and `file_name`. A hit can come from a public channel the user hasn't joined, and the client has no cached name for that channel.
+
+**Assumptions (routine choices)**
+- Versions: object_store 0.14 (aws feature), image 0.25 (png, jpeg, gif, webp), pdf-extract 0.12, mime_guess 2, tauri-plugin-dialog 2.8.
+- Who can download a file:
+  - the conversation must be readable now, which is `conversations::can_read_now`, the membership check step 4 names;
+  - and the file must be on a message that isn't deleted, or be the caller's own unsent upload.
+- Search scope is wider than the download check: it adds public channels for non-guests. A file hit in an unjoined public channel can't be downloaded until the user joins. The UI's "Join and open" does that.
+- Upload API: `POST /v1/conversations/{id}/files?name=` with the raw bytes as the body. The server guesses the MIME type from the name.
+- A message carries at most 10 files. Each file must be the sender's own unsent upload to the same conversation, and it goes out on one message only.
+- Atomic finalize: the object is completed first, then its row is inserted. That insert re-checks access and the quota under a lock on the uploader. On any failure the object is deleted.
+- Quota counts every file the user uploaded, including files on deleted messages.
+- Limits:
+  - thumbnails are 320 px PNGs, made from images up to 40 MB with decoder limits;
+  - extraction reads files up to 50 MB, runs for at most 60 s, and keeps 256 KiB of text, because Postgres caps a tsvector at 1 MB.
+- `file_updated` is emitted only when the thumbnail lands on a file that is already on a live message. A row lock orders this against a send that attaches the file.
+- The desktop protocol renders only PNG, JPEG, GIF and WebP inline. Everything else goes out as `application/octet-stream` with `attachment`, `nosniff` and a sandbox CSP. The server sends the same headers.
+- Attach picks one file with the native dialog, uploads it, then queues a message carrying it with an empty body. Uploads go straight to the server, not through the outbox, so attaching needs a connection.
+- Search:
+  - one endpoint per workspace, `GET /v1/workspaces/{id}/search?q=&limit=&offset=`;
+  - `websearch_to_tsquery` syntax;
+  - 20 hits per page by default, at most 50 per page and an offset of at most 1,000;
+  - the module interface is the `search::search` function, which a Tantivy backend would replace.
+
+**Not done, or not verified**
+- **S3 is built but not tested.** There is no S3 or MinIO test, because the Docker VM disk is nearly full.
+- **The desktop UI was not exercised in a running app.** That covers Attach, thumbnails over `commons-file://`, download links and the search panel. Clippy (native and wasm32) and `trunk build` pass, and the protocol's path parsing has a unit test. Step 6's webview check, that loads go through `commons-file://` and are denied after removal, is still to do.
+- **Files are never reclaimed.** Objects for deleted messages, and abandoned unsent uploads, are not deleted.
+- **Files load whole.** `commons-file://` buffers each file in memory, because Tauri's protocol responder takes a whole body. There are no HTTP range requests.
+- **URL form on Linux and Windows is untested.** `views::file_url` uses the macOS form, `commons-file://localhost/…`, and Windows uses `http://commons-file.localhost/…`.
+- **Search is measured locally only.** The VPS run for ADR 0003 is still to do. CJK remains the known v1 limit.
+- **Open question for the user:** does the Tantivy trigger's p95 mean one searcher at a time, which reads 257 ms, or concurrent load, which reads 528 ms with eight searchers?
