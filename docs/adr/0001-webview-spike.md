@@ -1,6 +1,6 @@
 # ADR 0001: M0 webview spike for the Tauri + Leptos desktop UI
 
-- Status: **recorded; budget not yet confirmed**. Building continues on decision 1, as the 2026-11-17 implementation decisions allow.
+- Status: **recorded; memory budget met (physical footprint); frame timing and VoiceOver still open**. Building continues on decision 1, as the 2026-11-17 implementation decisions allow.
 - Date: 2026-11-17
 - Decision under test: decision 1 in `docs/architecture.md` (Tauri 2 shell with Leptos views in WKWebView).
 
@@ -32,7 +32,7 @@ The two measures disagree about the budget:
 - **By RSS, the budget is missed**: about 370 MB steady and 394 MB at peak.
 - **By physical footprint, the budget is met**: 186 MB. This is the figure Activity Monitor shows as "Memory".
 
-RSS double-counts pages that the app and the three WebKit processes share, and it counts clean pages that are mapped from system frameworks. Acceptance criterion 8 doesn't say which measure the budget uses. That choice is open; see below.
+RSS double-counts pages that the app and the three WebKit processes share, and it counts clean pages that are mapped from system frameworks. The user decided on 2026-11-18 that the budget uses physical footprint.
 
 ### Burst handling and scrolling
 
@@ -61,15 +61,16 @@ The `ui` section of `target/spike/results.json` then holds:
 
 ## Outcome
 
-- **Memory:** inside the budget by physical footprint, over it by RSS. Recorded as a miss against the RSS reading.
+- **Memory:** meets the budget: 186 MB physical footprint against 300 MB. Summed RSS (370 MB) is kept for reference only.
 - **Scrolling and bursts:** not measured.
 - **VoiceOver:** not done. This pass belongs to the user; the checklist is below.
 
-The implementation decisions of 2026-11-17 say a failed or unmeasured spike does not stop the build, so the work continues on Tauri + Leptos. Decision 1 stays provisional, with GPUI as the fallback (plan §7), until three things are known:
+The implementation decisions of 2026-11-17 say a failed or unmeasured spike does not stop the build, so the work continues on Tauri + Leptos. Decision 1 stays provisional, with GPUI as the fallback (plan §7), until two things are known:
 
-1. which measure the memory budget uses;
-2. the frame and paint numbers;
-3. the VoiceOver result.
+1. the frame and paint numbers;
+2. the VoiceOver result.
+
+The memory measure is settled: physical footprint.
 
 Step 6 reruns these gates on the full app.
 
@@ -89,6 +90,6 @@ Start the app with `cargo xtask dev`, or run the spike binary (`COMMONS_SPIKE=1 
 - [ ] The typing indicator is announced politely.
 - [ ] Every action above works with the keyboard only, with VoiceOver off.
 
-## Open question for the user
+## Decided: memory measure (2026-11-18)
 
-Should the memory budget in acceptance criterion 8 be measured as physical footprint, which is what Activity Monitor shows, or as summed RSS? The plan's "RSS script" wording suggests RSS, and on that measure this build is about 70 MB over the budget.
+The memory budget in acceptance criterion 8 is measured as physical footprint, the figure Activity Monitor shows, summed over the app and its WebKit processes. On that measure this build meets the budget.

@@ -85,7 +85,7 @@ The user decided the following on 2026-11-17:
 5. A user added to a private channel or DM sees its history. A removed user receives nothing further from it, and the client drops its cached copy.
 6. A slow or dead socket cannot grow server memory without bound.
 7. On 2 vCPU / 4 GB with representative history, 500 concurrent clients stay within the latency budget set at M2. The proposed budget is p95 send-to-receive under 300 ms.
-8. The Mac app, counting its own process plus its webview processes, stays within the measured memory budget. The proposed budget is under 300 MB with three server accounts and 20 workspaces. The app passes a VoiceOver and keyboard-only pass over the core flows.
+8. The Mac app, counting its own process plus its webview processes, stays within the measured memory budget, measured as physical footprint, the figure Activity Monitor shows (decided 2026-11-18). The proposed budget is under 300 MB with three server accounts and 20 workspaces. The app passes a VoiceOver and keyboard-only pass over the core flows.
 9. A stale edit never overwrites newer text, and the user gets their edit back as a draft.
 
 ## 5. Implementation plan
@@ -101,7 +101,7 @@ Nothing exists yet, so "Verified today" for each step is the same: the repo hold
   - Migrations, and email/password accounts.
   - One workspace with one channel: the send API, the workspace event stream and the WebSocket.
   - The desktop app signs in, sends, receives live, and keeps its history across a restart, over the windowed subscription contract.
-  - **Spike:** a 10,000-message virtualized list receiving bursts of live updates. Measure RSS for the app plus its WebContent processes, check scroll smoothness, and do a VoiceOver pass.
+  - **Spike:** a 10,000-message virtualized list receiving bursts of live updates. Measure physical footprint for the app plus its WebContent processes, check scroll smoothness, and do a VoiceOver pass.
 - **Implements.** Decisions 1–4 and 6–9. The spike tests decision 1 before anything else is built on it.
 - **Invariant.**
   - A reader never sees seq k+1 before k has committed.
@@ -225,7 +225,7 @@ Every check below is proposed, since no test or command exists yet.
 | 4, 5 | Per-surface permission tests (events, search, files), including after removal; the backfill test |
 | 6 | The slow-consumer test |
 | 7 | The goose load test |
-| 8 | An RSS script that counts the WebContent processes; a VoiceOver checklist |
+| 8 | A physical-footprint script that counts the WebContent processes; a VoiceOver checklist |
 | 9 | The edit-race tests |
 
 Required services: Docker for testcontainers and compose. The load and acceptance runs need a 2 vCPU / 4 GB VM and a Mac.
@@ -337,7 +337,7 @@ Scope changed during the build. The user stopped the work after step 3. Steps 4 
 - **Socket cursors.** A client hello with a cursor ahead of the head gets `resync` and a disconnect, by design.
 - **Spike leftovers.** The spike's Tauri window stays on top in spike mode only. Its frame and paint numbers still need a run on an unlocked screen: `caffeinate -du cargo xtask spike`.
 - **Open questions for the user:**
-  - Which memory measure does acceptance criterion 8 use, RSS or physical footprint?
+  - Which memory measure acceptance criterion 8 uses: decided 2026-11-18, physical footprint. The spike's 186 MB meets the budget.
   - The license is still open.
 
 ## As built, steps 4–5 (2026-11-18)
