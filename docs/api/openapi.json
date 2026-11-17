@@ -1,0 +1,1790 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Commons API",
+    "description": "JSON over HTTPS plus one WebSocket (`/v1/socket`) per client.",
+    "license": {
+      "name": ""
+    },
+    "version": "1"
+  },
+  "paths": {
+    "/v1/auth/login": {
+      "post": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "401": {},
+          "429": {}
+        }
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "logout",
+        "responses": {
+          "204": {}
+        }
+      }
+    },
+    "/v1/auth/register": {
+      "post": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/reset": {
+      "post": {
+        "tags": [
+          "crate::auth"
+        ],
+        "summary": "Always answers 202 so the endpoint does not reveal which emails have accounts.",
+        "operationId": "reset_request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {}
+        }
+      }
+    },
+    "/v1/auth/reset/confirm": {
+      "post": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "reset_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetConfirm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "400": {}
+        }
+      }
+    },
+    "/v1/conversations/{id}/messages": {
+      "get": {
+        "tags": [
+          "crate::messages"
+        ],
+        "summary": "History for backfill, newest first, including tombstones.",
+        "operationId": "history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "until_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "before_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "interval_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagePage"
+                }
+              }
+            }
+          },
+          "403": {}
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::messages"
+        ],
+        "summary": "Send a message. Resending with the same `client_id` returns the first result.",
+        "operationId": "send",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "403": {}
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "tags": [
+          "crate::auth"
+        ],
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/meta": {
+      "get": {
+        "tags": [
+          "crate"
+        ],
+        "operationId": "meta",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Meta"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sync/workspaces/{id}": {
+      "get": {
+        "tags": [
+          "crate::sync"
+        ],
+        "operationId": "replay_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceReplay"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces": {
+      "get": {
+        "tags": [
+          "crate::directory"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::directory"
+        ],
+        "summary": "Creates a workspace with a default `#general` channel; the caller becomes its owner.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{id}/conversations": {
+      "get": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "operationId": "list_mine",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{id}/members": {
+      "get": {
+        "tags": [
+          "crate::directory"
+        ],
+        "operationId": "members",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::directory"
+        ],
+        "summary": "Adds an existing account to the workspace. Owners and admins only.",
+        "operationId": "add_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddWorkspaceMember"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Member"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccessVia": {
+        "type": "string",
+        "description": "Why a user can read a conversation over an interval.",
+        "enum": [
+          "membership",
+          "role"
+        ]
+      },
+      "AddWorkspaceMember": {
+        "type": "object",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "Conversation": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "kind"
+        ],
+        "properties": {
+          "dm_user_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Members of a DM or group DM, so clients can title it. Empty for channels."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ConversationKind"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Channel name; `None` for DMs and group DMs."
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ConversationKind": {
+        "type": "string",
+        "enum": [
+          "public",
+          "private",
+          "dm",
+          "group_dm"
+        ]
+      },
+      "ConversationList": {
+        "type": "object",
+        "required": [
+          "conversations"
+        ],
+        "properties": {
+          "conversations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conversation"
+            }
+          }
+        }
+      },
+      "CreateWorkspace": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Entity": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "user_id",
+              "start",
+              "end",
+              "kind"
+            ],
+            "properties": {
+              "end": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mention"
+                ]
+              },
+              "start": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "conversation_id",
+              "start",
+              "end",
+              "kind"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "end": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "channel_link"
+                ]
+              },
+              "start": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "start",
+              "end",
+              "kind"
+            ],
+            "properties": {
+              "end": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "emoji"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "start": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A structured entity stored beside the Markdown text. Offsets are UTF-8 byte offsets into `body`."
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "FileInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "conversation_id",
+          "name",
+          "size",
+          "mime",
+          "has_thumbnail"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "has_thumbnail": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "Member": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "workspace_id",
+          "display_name",
+          "role"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "MemberList": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Member"
+            }
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspace_id",
+          "conversation_id",
+          "author_id",
+          "client_id",
+          "body",
+          "entities",
+          "content_type",
+          "attachments",
+          "reactions",
+          "revision",
+          "deleted",
+          "created_seq",
+          "updated_seq",
+          "created_at_ms"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileInfo"
+            }
+          },
+          "author_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "body": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-generated UUIDv7 the server deduplicates on."
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Workspace seq of the event that created the message."
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "edited_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "encryption": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reserved for encrypted DMs; always `None` in v1."
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Entity"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Reaction"
+            }
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bumped by every edit and by delete. Edits must name the revision they were based on."
+          },
+          "thread_root_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "updated_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Workspace seq of the last change to this message, including reactions."
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "MessagePage": {
+        "type": "object",
+        "description": "A page of conversation history, served for backfill.",
+        "required": [
+          "messages",
+          "interval_seq"
+        ],
+        "properties": {
+          "interval_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Echo of the access interval the page was requested for."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "next_before_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before_seq` for the next page; `None` when history is exhausted."
+          }
+        }
+      },
+      "Meta": {
+        "type": "object",
+        "required": [
+          "protocol_version",
+          "server_version",
+          "min_client_version"
+        ],
+        "properties": {
+          "min_client_version": {
+            "type": "string"
+          },
+          "protocol_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "server_version": {
+            "type": "string"
+          }
+        }
+      },
+      "Notification": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "workspace_id",
+          "conversation_id",
+          "author_id",
+          "author_name",
+          "reason",
+          "preview"
+        ],
+        "properties": {
+          "author_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "author_name": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preview": {
+            "type": "string",
+            "description": "Plain-text preview, already checked against the recipient's current access."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/NotifyReason"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "NotifyLevel": {
+        "type": "string",
+        "enum": [
+          "all",
+          "mentions",
+          "nothing"
+        ]
+      },
+      "NotifyReason": {
+        "type": "string",
+        "enum": [
+          "mention",
+          "direct_message",
+          "keyword",
+          "all_messages",
+          "thread_reply"
+        ]
+      },
+      "Preferences": {
+        "type": "object",
+        "properties": {
+          "channel_level": {
+            "$ref": "#/components/schemas/NotifyLevel",
+            "description": "Default level for channels. DMs always notify unless muted."
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "muted": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
+      "Reaction": {
+        "type": "object",
+        "required": [
+          "emoji",
+          "user_ids"
+        ],
+        "properties": {
+          "emoji": {
+            "type": "string"
+          },
+          "user_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
+      "ReadCursorState": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "conversation_id",
+          "seq"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "RegisterRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "ResetConfirm": {
+        "type": "object",
+        "required": [
+          "token",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "ResetRequest": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "owner",
+          "admin",
+          "member",
+          "guest"
+        ]
+      },
+      "SendMessage": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "body"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "body": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-generated UUIDv7; resending the same id does nothing."
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Entity"
+            }
+          },
+          "thread_root_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "user"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "UserEvent": {
+        "type": "object",
+        "required": [
+          "seq",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/UserEventBody"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UserEventBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The user joined a workspace. Resume its stream from `start_seq - 1`.",
+            "required": [
+              "workspace",
+              "start_seq",
+              "type"
+            ],
+            "properties": {
+              "start_seq": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_joined"
+                ]
+              },
+              "workspace": {
+                "$ref": "#/components/schemas/Workspace"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The user was removed from a workspace. The client purges it.",
+            "required": [
+              "workspace_id",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_removed"
+                ]
+              },
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "workspace_id",
+              "conversation_id",
+              "seq",
+              "type"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "seq": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "read_cursor"
+                ]
+              },
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "notification",
+              "type"
+            ],
+            "properties": {
+              "notification": {
+                "$ref": "#/components/schemas/Notification"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "notify"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "preferences",
+              "type"
+            ],
+            "properties": {
+              "preferences": {
+                "$ref": "#/components/schemas/Preferences"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "preferences_changed"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "UserReplay": {
+        "type": "object",
+        "required": [
+          "events",
+          "next_since",
+          "head"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserEvent"
+            }
+          },
+          "head": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_since": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "UserSnapshot": {
+        "type": "object",
+        "required": [
+          "seq",
+          "workspaces",
+          "read_cursors",
+          "preferences"
+        ],
+        "properties": {
+          "preferences": {
+            "$ref": "#/components/schemas/Preferences"
+          },
+          "read_cursors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadCursorState"
+            }
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": false,
+              "prefixItems": [
+                {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              ]
+            },
+            "description": "Each workspace with the seq its stream should resume after."
+          }
+        }
+      },
+      "Workspace": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceEvent": {
+        "type": "object",
+        "required": [
+          "seq",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/WorkspaceEventBody"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "WorkspaceEventBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A public channel was created; visible to every workspace member.",
+            "required": [
+              "conversation",
+              "type"
+            ],
+            "properties": {
+              "conversation": {
+                "$ref": "#/components/schemas/Conversation"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "conversation_created"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An access interval opened. `has_access` is the user's access after the change.",
+            "required": [
+              "conversation",
+              "user_id",
+              "via",
+              "has_access",
+              "type"
+            ],
+            "properties": {
+              "conversation": {
+                "$ref": "#/components/schemas/Conversation"
+              },
+              "has_access": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member_added"
+                ]
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "via": {
+                "$ref": "#/components/schemas/AccessVia"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An access interval closed. When `has_access` is false the subject's client purges.",
+            "required": [
+              "conversation_id",
+              "user_id",
+              "via",
+              "has_access",
+              "type"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "has_access": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member_removed"
+                ]
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "via": {
+                "$ref": "#/components/schemas/AccessVia"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/Message"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_posted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/Message"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_edited"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Tombstone: the message with body and entities cleared.",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/Message"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_deleted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "conversation_id",
+              "message_id",
+              "user_id",
+              "emoji",
+              "type"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "emoji": {
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reaction_added"
+                ]
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "conversation_id",
+              "message_id",
+              "user_id",
+              "emoji",
+              "type"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "emoji": {
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reaction_removed"
+                ]
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "type"
+            ],
+            "properties": {
+              "file": {
+                "$ref": "#/components/schemas/FileInfo"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "file_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "member",
+              "type"
+            ],
+            "properties": {
+              "member": {
+                "$ref": "#/components/schemas/Member"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_member_joined"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "user_id",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_member_left"
+                ]
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "user_id",
+              "role",
+              "type"
+            ],
+            "properties": {
+              "role": {
+                "$ref": "#/components/schemas/Role"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member_role_changed"
+                ]
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ]
+      },
+      "WorkspaceList": {
+        "type": "object",
+        "required": [
+          "workspaces"
+        ],
+        "properties": {
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workspace"
+            }
+          }
+        }
+      },
+      "WorkspaceReplay": {
+        "type": "object",
+        "description": "`GET /v1/sync/workspaces/{id}?since=`. `next_since` always advances past filtered events.",
+        "required": [
+          "events",
+          "next_since",
+          "head"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceEvent"
+            }
+          },
+          "head": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_since": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceSnapshot",
+                "description": "Present when `since` was before the prune point; replay continues after `snapshot.seq`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "WorkspaceSnapshot": {
+        "type": "object",
+        "description": "What a user can read in a workspace at watermark `seq`.",
+        "required": [
+          "seq",
+          "workspace",
+          "members",
+          "conversations"
+        ],
+        "properties": {
+          "conversations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conversation"
+            },
+            "description": "Conversations the user can read at `seq`."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Member"
+            }
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/Workspace"
+          }
+        }
+      }
+    }
+  }
+}
