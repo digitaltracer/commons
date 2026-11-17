@@ -184,8 +184,13 @@ pub enum SearchHitKind {
 pub struct SearchHit {
     pub kind: SearchHitKind,
     pub conversation_id: Uuid,
+    /// Channel name, so hits in public channels the user has not joined can be titled.
+    #[serde(default)]
+    pub conversation_name: Option<String>,
     pub message_id: Option<Uuid>,
     pub file_id: Option<Uuid>,
+    #[serde(default)]
+    pub file_name: Option<String>,
     /// Snippet text; matched terms are wrapped in U+0002 … U+0003. Render as text only.
     pub snippet: String,
     pub created_at_ms: i64,

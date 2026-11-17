@@ -36,6 +36,7 @@ use utoipa::OpenApi;
         crate::files::upload,
         crate::files::download,
         crate::files::download_thumbnail,
+        crate::search::handle,
         crate::sync::replay_workspace,
         crate::sync::replay_user,
     ),

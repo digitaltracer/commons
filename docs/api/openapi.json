@@ -911,6 +911,65 @@
           "403": {}
         }
       }
+    },
+    "/v1/workspaces/{id}/search": {
+      "get": {
+        "tags": [
+          "crate::search"
+        ],
+        "summary": "Search messages, file names and extracted file text in a workspace. Covers joined\nchannels and DMs, plus public channels for members who are not guests. CJK text is not\nsegmented in v1.",
+        "operationId": "handle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          },
+          "400": {},
+          "403": {}
+        }
+      }
     }
   },
   "components": {
@@ -1584,6 +1643,81 @@
           "member",
           "guest"
         ]
+      },
+      "SearchHit": {
+        "type": "object",
+        "required": [
+          "kind",
+          "conversation_id",
+          "snippet",
+          "created_at_ms"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversation_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Channel name, so hits in public channels the user has not joined can be titled."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "file_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "file_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SearchHitKind"
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Snippet text; matched terms are wrapped in U+0002 … U+0003. Render as text only."
+          }
+        }
+      },
+      "SearchHitKind": {
+        "type": "string",
+        "enum": [
+          "message",
+          "file_name",
+          "file_text"
+        ]
+      },
+      "SearchResults": {
+        "type": "object",
+        "required": [
+          "hits"
+        ],
+        "properties": {
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            }
+          }
+        }
       },
       "SendMessage": {
         "type": "object",

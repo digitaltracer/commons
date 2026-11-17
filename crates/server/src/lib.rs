@@ -19,6 +19,7 @@ pub mod me;
 pub mod messages;
 pub mod notify;
 pub mod openapi;
+pub mod search;
 pub mod sqlx;
 pub mod sync;
 pub mod ws;
@@ -90,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .merge(conversations::routes())
         .merge(messages::routes())
         .merge(files::routes())
+        .merge(search::routes())
         .merge(me::routes())
         .merge(sync::routes())
         .route("/socket", get(ws::upgrade))
