@@ -275,3 +275,67 @@ Required services: Docker for testcontainers and compose. The load and acceptanc
 - **Toolchain.** The user has authorized the implementer to install what the build needs: `brew install rustup` (or rustup-init) with the `wasm32-unknown-unknown` target, and `cargo install` of trunk (or whatever Leptos build tool the step uses), tauri-cli and cargo-deny. Homebrew's `rust` formula is already installed; resolve any conflict between the two, and record the commands you ran under As built.
 - **Where the plan lives.** The first commit copies this plan to `docs/architecture.md` (`docs: add architecture plan`). From then on, `docs/architecture.md` is the copy that gets committed, and the As built note goes there. `.agents/tasks/` is git-ignored on this machine and must never be committed.
 - **License.** Still undecided (open question). cargo-deny checks the licenses of dependencies only. Do not add a LICENSE file, and do not set a `license` field beyond leaving it unset.
+
+## As built (2026-11-17)
+
+Scope changed during the build. The user stopped the work after step 3. Steps 4 and 5 go to a new implementer, and steps 6 and 7 are not done.
+
+**Steps**
+- **Step 1, done.**
+  - Built: the workspace and crates; CI (fmt, clippy native and wasm32, `cargo xtask check-deps`, tests, cargo-deny); `cargo xtask dev`; migrations; email and password accounts; the transactional workspace stream; the WebSocket; the desktop app over windowed subscriptions.
+  - Check: the seq-ordering test, `crates/server/tests/seq_order.rs`, passes, and so do the window tests (dropped batch, stale generation, unacknowledged cap, oversized delta).
+  - Spike, recorded in `docs/adr/0001-webview-spike.md`. Memory is **370 MB RSS, which misses the 300 MB budget, and 186 MB physical footprint, which meets it**. Frame and paint timing was **not measured**, because the screen was locked. The VoiceOver checklist is left for the user.
+- **Step 2, done.**
+  - Built: channels, DMs and roles; intervals, including role-derived ones; the user stream; snapshots; pruning; backfill by interval with monotonic merge; the outbox; several accounts.
+  - Checks pass: the property test (200 cases once, 24 by default); the reconnect-after-removal test (10/12/15/20 exactly); role downgrade; next_since advances; late backfill pages; the crash before and during backfill; the slow consumer (1 MB growth).
+- **Step 3, done.**
+  - Built: threads, reactions, validated mentions, edits with a revision check, delete wins, read cursors, the notify module, core presentation, OS notifications, presence and typing.
+  - Checks pass: the notify-rule unit tests; edit race and edit versus delete; script tag rendered as text. The goose load test ran; see `docs/adr/0002-load-test.md`:
+    - p95 send-to-receive is 727 ms, which misses the proposed 300 ms;
+    - sustained throughput is 271 to 405 commits/s on tmpfs and 65 on virtiofs disk, below the ~500 assumed in decision 9;
+    - the 1,000-write burst drains in 5.7 s.
+- **Steps 4 (files) and 5 (search): not done; handed to a new implementer.**
+- **Steps 6 (v1 hardening) and 7: not done.**
+
+**Deviations, and why**
+- **sqlx facade dropped.** The server uses `sqlx-core` and `sqlx-postgres` directly, through `crates/server/src/sqlx.rs`, with migrations embedded in `db.rs`.
+  - Why: the `sqlx` facade lists `sqlx-sqlite` as an optional dependency, and cargo still checks its `links = "sqlite3"` key against rusqlite's.
+  - That conflict pinned the client to libsqlite3-sys 0.30, which is affected by RUSTSEC-2026-0459.
+  - The client now uses rusqlite 0.41 with libsqlite3-sys 0.39.1.
+  - Queries are checked at runtime, not compile time; decision 8's rationale mentioned compile-time checks.
+- **chrono replaced by time.** RUSTSEC-2026-0543 marks chrono unmaintained.
+- **Unmaintained transitive crates are allowed.** `deny.toml` sets `unmaintained = "workspace"`. This covers paste (via leptos), proc-macro-error (via gtk) and astral-tokio-tar (via testcontainers).
+- **Fan-out filters in memory.** Decision 11 is built as one feed per workspace per node (`feed.rs`), and each socket filters batches against its user's access set. The first version ran SQL per socket and failed the load test. `socket_filter.rs` proves the in-memory filter equals the SQL replay.
+- **Workspace events commit one at a time.** The core commits each workspace event together with its own cursor advance, rather than one commit per page. A per-page commit applied a removal followed by a rejoin wrongly; the property test found it.
+- **Mentions of non-members are dropped, not rejected.** They are stored as plain text and notify nobody, so a send never fails over a mention.
+- **The UI's dependency rule is enforced by `cargo xtask check-deps`** (the wasm32 dependency graph), not by cargo-deny.
+
+**Assumptions (routine choices)**
+- Versions: Tauri 2.12 (3.x is alpha), Leptos 0.8, axum 0.8, sqlx-core 0.8.6, trunk as the Leptos build tool, testcontainers 0.27 with Postgres 16-alpine on tmpfs, goose 0.19.
+- **Test Postgres uses tmpfs** because the Docker VM disk is full. I did not prune the user's 51 GB of unused volumes.
+- The message list is a bounded window of 300 rows with variable row heights. It moves by 100 rows at either end and keeps the first visible row anchored.
+- Decisions about the OS:
+  - do-not-disturb is left to the OS, since macOS Focus filters notifications;
+  - presence counts connections per node;
+  - workspace members are added by email (invites are step 6);
+  - the server ignores `--role` (decision 7 leaves it for later).
+- Endpoints are under `/v1`; see `docs/api/openapi.json`, regenerated with `cargo xtask openapi`.
+
+**Toolchain commands run**
+- `~/.cargo/bin/rustup` was already installed. Homebrew's `rust` shadows it on PATH, so builds ran with `export PATH=$HOME/.cargo/bin:$PATH`.
+- `rustup target add wasm32-unknown-unknown`
+- `cargo install --locked trunk tauri-cli cargo-deny`, which installed trunk 0.22.1, tauri-cli 2.12.5 and cargo-deny 0.21.0.
+- `cargo tauri icon` generated the placeholder icon.
+
+**Loose ends from step 3 the next implementer must know**
+- **Latency and throughput budgets are not met locally.** The VPS rerun and profiling are listed in ADR 0002: the pool cap of 32, one notify job per message, and per-socket framing.
+- **Files are stubbed.** `messages::check_attachments` refuses attachments and `attach_files` is a no-op, so step 4 replaces both. The UI's Attach button and the `commons-file://` protocol are not wired.
+- **No tests yet for presence or typing.** Typing is checked against access on send and on delivery.
+- **Shared resources need care:**
+  - the jobs worker loop is shared, so new job kinds go in `jobs::handle`;
+  - tests that need determinism set `job_workers = 0` and call `jobs::run_one`.
+- **Socket cursors.** A client hello with a cursor ahead of the head gets `resync` and a disconnect, by design.
+- **Spike leftovers.** The spike's Tauri window stays on top in spike mode only. Its frame and paint numbers still need a run on an unlocked screen: `caffeinate -du cargo xtask spike`.
+- **Open questions for the user:**
+  - Which memory measure does acceptance criterion 8 use, RSS or physical footprint?
+  - The license is still open.
