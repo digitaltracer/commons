@@ -1100,6 +1100,70 @@ impl Account {
     pub fn notifier(&self) -> &Arc<dyn Notifier> {
         &self.notifier
     }
+
+    // ---- files ----
+
+    /// Streams a local file to a conversation. Uploads go straight to the server, not
+    /// through the outbox, so they need a connection.
+    pub async fn upload_file(
+        &self,
+        conversation_id: Uuid,
+        path: &std::path::Path,
+    ) -> Result<proto::model::FileInfo, SyncError> {
+        let token = self.token()?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| anyhow::anyhow!("not a file: {}", path.display()))?;
+        let v = self
+            .transport
+            .upload(
+                &format!("/conversations/{conversation_id}/files"),
+                &[("name", name)],
+                path,
+                &token,
+            )
+            .await
+            .map_err(SyncError::from_transport)?;
+        let r: proto::api::UploadResponse =
+            serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode upload: {e}"))?;
+        Ok(r.file)
+    }
+
+    /// Uploads a file and queues a message carrying it.
+    pub async fn attach_file(
+        &self,
+        conversation_id: Uuid,
+        thread_root_id: Option<Uuid>,
+        path: &std::path::Path,
+    ) -> Result<Uuid, SyncError> {
+        let file = self.upload_file(conversation_id, path).await?;
+        Ok(self.send_message(
+            conversation_id,
+            String::new(),
+            thread_root_id,
+            vec![file.id],
+        )?)
+    }
+
+    /// A file's bytes and content type, fetched with this account's session. The server
+    /// checks access on every call, so this fails once the user can no longer read it.
+    pub async fn fetch_file(
+        &self,
+        file_id: Uuid,
+        thumbnail: bool,
+    ) -> Result<(Vec<u8>, String), SyncError> {
+        let token = self.token()?;
+        let path = if thumbnail {
+            format!("/files/{file_id}/thumbnail")
+        } else {
+            format!("/files/{file_id}")
+        };
+        self.transport
+            .download(&path, &token)
+            .await
+            .map_err(SyncError::from_transport)
+    }
 }
 
 impl Inner {

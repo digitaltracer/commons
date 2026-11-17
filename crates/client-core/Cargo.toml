@@ -32,6 +32,7 @@ client-core = { path = ".", features = ["testing"] }
 server = { workspace = true, features = ["testing"] }
 proptest = "1"
 tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true
