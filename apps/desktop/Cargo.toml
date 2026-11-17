@@ -1,0 +1,30 @@
+[package]
+name = "commons-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The Commons desktop shell: Tauri 2 hosting the core and the Leptos views."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+proto.workspace = true
+client-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tauri = { version = "2", features = [] }
+async-trait.workspace = true
+
+[features]
+# Set by `cargo tauri build`: serve the bundled frontend instead of the dev server.
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints]
+workspace = true
