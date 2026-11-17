@@ -1,6 +1,6 @@
 //! Tauri commands: the UI's only way to reach the core.
 use client_core::transport::Method;
-use proto::model::{Conversation, ConversationKind, Member};
+use proto::model::{Conversation, ConversationKind, Entity, Member, Preferences};
 use proto::view::{AppEvent, SidebarView};
 use proto::window::{WindowBatch, WindowSpec};
 use tauri::State;
@@ -43,6 +43,17 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         workspace_members,
         open_dm,
         search,
+        conversation_members,
+        add_member,
+        remove_member,
+        online,
+        preferences,
+        set_preferences,
+        set_muted,
+        recent_emoji,
+        reconnect_now,
+        sign_in_again,
+        save_file,
         ui_log,
         crate::spike::spike_config,
         crate::spike::spike_report,
@@ -128,11 +139,18 @@ fn send_message(
     conversation_id: Uuid,
     body: String,
     thread_root_id: Option<Uuid>,
+    mentions: Option<Vec<Entity>>,
 ) -> R<Uuid> {
     host.core
         .account(account_id)
         .map_err(err)?
-        .send_message(conversation_id, body, thread_root_id, vec![])
+        .send_message_with(
+            conversation_id,
+            body,
+            thread_root_id,
+            vec![],
+            mentions.unwrap_or_default(),
+        )
         .map_err(err)
 }
 
@@ -171,6 +189,35 @@ async fn attach_file(
                 .to_string(),
             other => other.to_string(),
         })
+}
+
+/// Asks where to save an attachment, then fetches it through the core, which checks access.
+/// `false` when the dialog was cancelled.
+#[tauri::command]
+async fn save_file(
+    app: tauri::AppHandle,
+    host: State<'_, Host>,
+    account_id: Uuid,
+    file_id: Uuid,
+    name: String,
+) -> R<bool> {
+    use tauri_plugin_dialog::DialogExt;
+    let a = host.core.account(account_id).map_err(err)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Save attachment")
+        .set_file_name(&name)
+        .save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let Some(picked) = rx.await.map_err(err)? else {
+        return Ok(false);
+    };
+    let path = picked.into_path().map_err(err)?;
+    let (bytes, _) = a.fetch_file(file_id, false).await.map_err(refusal)?;
+    tokio::fs::write(&path, bytes).await.map_err(err)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -298,17 +345,113 @@ async fn join_channel(host: State<'_, Host>, account_id: Uuid, conversation_id: 
 #[tauri::command]
 async fn leave_channel(host: State<'_, Host>, account_id: Uuid, conversation_id: Uuid) -> R<()> {
     let a = host.core.account(account_id).map_err(err)?;
-    let _: serde_json::Value = a
-        .api(
-            Method::Post,
-            &format!("/conversations/{conversation_id}/leave"),
-            &[],
-            None::<&()>,
-            None,
-        )
+    a.leave(conversation_id).await.map_err(refusal)
+}
+
+/// The server's own wording for a refused request, when it gave one.
+fn refusal(e: client_core::account::SyncError) -> String {
+    match e {
+        client_core::account::SyncError::Transport(
+            client_core::transport::TransportError::Status { body, .. },
+        ) if body["message"].is_string() => body["message"].as_str().unwrap_or_default().into(),
+        other => other.to_string(),
+    }
+}
+
+#[tauri::command]
+async fn conversation_members(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+) -> R<Vec<Member>> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.conversation_members(conversation_id)
         .await
-        .map_err(err)?;
+        .map_err(refusal)
+}
+
+#[tauri::command]
+async fn add_member(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.add_member(conversation_id, user_id)
+        .await
+        .map_err(refusal)
+}
+
+#[tauri::command]
+async fn remove_member(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.remove_member(conversation_id, user_id)
+        .await
+        .map_err(refusal)
+}
+
+#[tauri::command]
+fn online(host: State<'_, Host>, account_id: Uuid) -> R<Vec<Uuid>> {
+    Ok(host.core.account(account_id).map_err(err)?.online())
+}
+
+#[tauri::command]
+fn preferences(host: State<'_, Host>, account_id: Uuid) -> R<Preferences> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .preferences()
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn set_preferences(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    preferences: Preferences,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.set_preferences(preferences).await.map_err(refusal)
+}
+
+#[tauri::command]
+async fn set_muted(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    muted: bool,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.set_muted(conversation_id, muted).await.map_err(refusal)
+}
+
+#[tauri::command]
+fn recent_emoji(host: State<'_, Host>, account_id: Uuid) -> R<Vec<String>> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .recent_emoji()
+        .map_err(err)
+}
+
+#[tauri::command]
+fn reconnect_now(host: State<'_, Host>, account_id: Uuid) -> R<()> {
+    host.core.account(account_id).map_err(err)?.reconnect_now();
     Ok(())
+}
+
+#[tauri::command]
+async fn sign_in_again(host: State<'_, Host>, account_id: Uuid, password: String) -> R<()> {
+    host.core
+        .sign_in_again(account_id, &password)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -350,9 +493,12 @@ async fn search(
     account_id: Uuid,
     workspace_id: Uuid,
     query: String,
+    offset: Option<u32>,
 ) -> R<Vec<proto::view::SearchHitView>> {
     let a = host.core.account(account_id).map_err(err)?;
-    a.search(workspace_id, &query).await.map_err(err)
+    a.search(workspace_id, &query, offset.unwrap_or(0))
+        .await
+        .map_err(refusal)
 }
 
 #[tauri::command]

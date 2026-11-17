@@ -21,11 +21,17 @@
     "windows": [
       {
         "title": "Commons",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 640,
-        "minHeight": 420,
-        "label": "main"
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 560,
+        "label": "main",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 20,
+          "y": 26
+        }
       }
     ],
     "security": {
