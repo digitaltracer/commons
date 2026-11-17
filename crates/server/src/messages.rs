@@ -99,12 +99,19 @@ pub async fn load_many(conn: &mut PgConnection, ids: &[Uuid]) -> ApiResult<Vec<M
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
-/// Fills `Message::attachments`. Files arrive in step 4; until then this is a no-op.
+/// Fills `Message::attachments` in the order each message lists them.
 async fn attach_files(
-    _conn: &mut PgConnection,
-    _by_id: &mut HashMap<Uuid, Message>,
-    _attachments: HashMap<Uuid, Vec<Uuid>>,
+    conn: &mut PgConnection,
+    by_id: &mut HashMap<Uuid, Message>,
+    attachments: HashMap<Uuid, Vec<Uuid>>,
 ) -> ApiResult<()> {
+    let all: Vec<Uuid> = attachments.values().flatten().copied().collect();
+    let infos = crate::files::load_infos(conn, &all).await?;
+    for (message_id, ids) in attachments {
+        if let Some(m) = by_id.get_mut(&message_id) {
+            m.attachments = ids.iter().filter_map(|id| infos.get(id).cloned()).collect();
+        }
+    }
     Ok(())
 }
 
@@ -250,6 +257,7 @@ pub async fn send(
     .bind(&attachments)
     .execute(&mut *tx)
     .await?;
+    crate::files::link(&mut tx, id, &attachments).await?;
     let mut message = load_one(&mut tx, id).await?;
     idempotency::store(
         &mut tx,
@@ -273,19 +281,15 @@ pub async fn send(
     Ok(Json(message))
 }
 
-/// Validates attachment ids. Files arrive in step 4; until then attachments are refused.
+/// Validates and locks the files a message attaches: the sender's own unsent uploads to
+/// this conversation.
 pub async fn check_attachments(
-    _conn: &mut PgConnection,
-    _conversation_id: Uuid,
-    _user_id: Uuid,
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
     ids: &[Uuid],
 ) -> ApiResult<Vec<Uuid>> {
-    if !ids.is_empty() {
-        return Err(ApiError::BadRequest(
-            "attachments are not supported yet".into(),
-        ));
-    }
-    Ok(vec![])
+    crate::files::claim_for_message(conn, conversation_id, user_id, ids).await
 }
 
 /// Work queued in the same transaction as a new message: the notify job.

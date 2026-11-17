@@ -21,7 +21,10 @@ pub struct Config {
     pub job_workers: usize,
     pub job_lease: Duration,
     pub job_poll: Duration,
+    /// Local file store root, used when `s3_bucket` is unset.
     pub files_dir: String,
+    /// S3-compatible bucket; credentials, region and endpoint come from the `AWS_*` variables.
+    pub s3_bucket: Option<String>,
     pub max_file_bytes: u64,
     pub user_quota_bytes: u64,
 }
@@ -45,6 +48,7 @@ impl Default for Config {
             job_lease: Duration::from_secs(60),
             job_poll: Duration::from_millis(500),
             files_dir: "./data/files".into(),
+            s3_bucket: None,
             max_file_bytes: 2 << 30,
             user_quota_bytes: 20 << 30,
         }
@@ -71,6 +75,7 @@ impl Config {
         if let Some(v) = var("COMMONS_FILES_DIR") {
             c.files_dir = v;
         }
+        c.s3_bucket = var("COMMONS_S3_BUCKET");
         if let Some(v) = var("COMMONS_MAX_FILE_BYTES") {
             c.max_file_bytes = v.parse()?;
         }

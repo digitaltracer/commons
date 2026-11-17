@@ -124,6 +124,62 @@
         }
       }
     },
+    "/v1/conversations/{id}/files": {
+      "post": {
+        "tags": [
+          "crate::files"
+        ],
+        "summary": "Upload a file to a conversation. The request body is the file's bytes, streamed to the\nstore; the file becomes visible only once complete. Attach it by id when sending.",
+        "operationId": "upload",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
+          },
+          "403": {},
+          "413": {}
+        }
+      }
+    },
     "/v1/conversations/{id}/join": {
       "post": {
         "tags": [
@@ -341,6 +397,62 @@
             }
           },
           "403": {}
+        }
+      }
+    },
+    "/v1/files/{id}": {
+      "get": {
+        "tags": [
+          "crate::files"
+        ],
+        "summary": "Download a file. Access is checked on every request; a download already streaming when\naccess is revoked finishes.",
+        "operationId": "download",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {}
+        }
+      }
+    },
+    "/v1/files/{id}/thumbnail": {
+      "get": {
+        "tags": [
+          "crate::files"
+        ],
+        "summary": "A PNG thumbnail of an image file, under the same access check as the file.",
+        "operationId": "download_thumbnail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {}
+            }
+          },
+          "404": {}
         }
       }
     },
@@ -1533,6 +1645,17 @@
         "properties": {
           "role": {
             "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "UploadResponse": {
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "$ref": "#/components/schemas/FileInfo"
           }
         }
       },

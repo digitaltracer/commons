@@ -105,6 +105,8 @@ async fn dispatch(state: &AppState, job: &Job) -> anyhow::Result<()> {
 pub async fn handle(state: &AppState, job: &Job) -> anyhow::Result<()> {
     match job.kind.as_str() {
         crate::notify::JOB => crate::notify::run(state, &job.payload).await,
+        crate::files::THUMBNAIL_JOB => crate::files::thumbnail(state, &job.payload).await,
+        crate::files::EXTRACT_JOB => crate::files::extract(state, job).await,
         other => anyhow::bail!("unknown job kind {other}"),
     }
 }

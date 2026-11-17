@@ -10,6 +10,7 @@ pub mod db;
 pub mod directory;
 pub mod error;
 pub mod feed;
+pub mod files;
 pub mod hub;
 pub mod idempotency;
 pub mod jobs;
@@ -39,6 +40,7 @@ pub struct Inner {
     pub feeds: feed::Feeds,
     pub mailer: Arc<dyn mail::Mailer>,
     pub limiter: auth::Limiter,
+    pub files: Arc<dyn object_store::ObjectStore>,
 }
 
 /// Shared server state. Cheap to clone.
@@ -56,20 +58,26 @@ impl AppState {
     pub async fn new(config: Config, mailer: Arc<dyn mail::Mailer>) -> anyhow::Result<Self> {
         let pool = db::connect(&config.database_url).await?;
         db::migrate(&pool).await?;
-        Ok(Self::with_pool(config, pool, mailer))
+        Self::with_pool(config, pool, mailer)
     }
 
-    pub fn with_pool(config: Config, pool: sqlx::PgPool, mailer: Arc<dyn mail::Mailer>) -> Self {
+    pub fn with_pool(
+        config: Config,
+        pool: sqlx::PgPool,
+        mailer: Arc<dyn mail::Mailer>,
+    ) -> anyhow::Result<Self> {
         let limiter = auth::Limiter::new(config.auth_attempts_per_minute);
         let hub = hub::Hub::new(config.connection_queue);
-        AppState(Arc::new(Inner {
+        let files = files::open_store(&config)?;
+        Ok(AppState(Arc::new(Inner {
             pool,
             config,
             hub,
             feeds: feed::Feeds::default(),
             mailer,
             limiter,
-        }))
+            files,
+        })))
     }
 }
 
@@ -81,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .merge(directory::routes())
         .merge(conversations::routes())
         .merge(messages::routes())
+        .merge(files::routes())
         .merge(me::routes())
         .merge(sync::routes())
         .route("/socket", get(ws::upgrade))
