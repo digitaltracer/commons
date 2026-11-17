@@ -194,6 +194,12 @@ pub struct SearchHit {
     /// Snippet text; matched terms are wrapped in U+0002 … U+0003. Render as text only.
     pub snippet: String,
     pub created_at_ms: i64,
+    /// Author of the message, or of the message that carries the file.
+    #[serde(default)]
+    pub author_id: Option<Uuid>,
+    /// Set when the hit is a thread reply.
+    #[serde(default)]
+    pub thread_root_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

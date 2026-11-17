@@ -28,6 +28,7 @@ use utoipa::OpenApi;
         crate::conversations::browse,
         crate::conversations::join,
         crate::conversations::leave,
+        crate::conversations::list_members,
         crate::conversations::add_member,
         crate::conversations::remove_member,
         crate::conversations::open_dm,

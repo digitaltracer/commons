@@ -4,10 +4,9 @@ use crate::sqlx::{PgConnection, Row};
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use proto::api::{AddConversationMember, ConversationList, CreateChannel, OpenDm};
+use proto::api::{AddConversationMember, ConversationList, CreateChannel, MemberList, OpenDm};
 use proto::events::{AccessVia, WorkspaceEventBody};
-use proto::model::Role;
-use proto::model::{Conversation, ConversationKind};
+use proto::model::{Conversation, ConversationKind, Member, Role};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -25,7 +24,10 @@ pub fn routes() -> Router<AppState> {
         .route("/workspaces/{id}/dms", post(open_dm))
         .route("/conversations/{id}/join", post(join))
         .route("/conversations/{id}/leave", post(leave))
-        .route("/conversations/{id}/members", post(add_member))
+        .route(
+            "/conversations/{id}/members",
+            get(list_members).post(add_member),
+        )
         .route(
             "/conversations/{id}/members/{user_id}",
             delete(remove_member),
@@ -415,12 +417,71 @@ pub async fn leave(
     .await?
     {
         sync::append(&mut tx, ws, vec![e]).await?;
+        rekey_group_dm(&mut tx, conversation_id).await?;
     }
     tx.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// Adds a workspace member to a channel. Anyone who can read the channel may add people.
+/// Current members of a conversation: open membership intervals of current workspace
+/// members, with their workspace profile. Only someone who can read it now may list them.
+#[utoipa::path(get, path = "/v1/conversations/{id}/members", params(("id" = Uuid, Path)),
+    responses((status = 200, body = MemberList), (status = 403)))]
+pub async fn list_members(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(conversation_id): Path<Uuid>,
+) -> ApiResult<Json<MemberList>> {
+    let mut conn = state.pool.acquire().await?;
+    if !can_read_now(&mut conn, conversation_id, auth.user_id).await {
+        return Err(ApiError::Forbidden);
+    }
+    let rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT wm.user_id, wm.workspace_id, wm.display_name, wm.role
+           FROM access_intervals ai
+           JOIN conversations c ON c.id = ai.conversation_id
+           JOIN workspace_members wm ON wm.workspace_id = c.workspace_id
+                AND wm.user_id = ai.user_id AND wm.left_seq IS NULL
+          WHERE ai.conversation_id = $1 AND ai.via = 'membership' AND ai.left_seq IS NULL
+          ORDER BY wm.display_name, wm.user_id",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(Json(MemberList {
+        members: rows
+            .into_iter()
+            .filter_map(|(user_id, workspace_id, display_name, role)| {
+                Some(Member {
+                    user_id,
+                    workspace_id,
+                    display_name,
+                    role: Role::parse(&role)?,
+                })
+            })
+            .collect(),
+    }))
+}
+
+/// Keeps a group DM's key equal to its current members, so opening a DM with exactly these
+/// people finds it. If another group DM already has that set, this one keeps no key.
+async fn rekey_group_dm(conn: &mut PgConnection, conversation_id: Uuid) -> ApiResult<()> {
+    sqlx::query(
+        "UPDATE conversations c SET dm_key = CASE WHEN EXISTS (
+                SELECT 1 FROM conversations o WHERE o.workspace_id = c.workspace_id
+                   AND o.id <> c.id AND o.dm_key = k.key) THEN NULL ELSE k.key END
+           FROM (SELECT string_agg(DISTINCT user_id::text, ',' ORDER BY user_id::text) AS key
+                   FROM access_intervals
+                  WHERE conversation_id = $1 AND via = 'membership' AND left_seq IS NULL) k
+          WHERE c.id = $1 AND c.kind = 'group_dm'",
+    )
+    .bind(conversation_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Adds a workspace member to a channel or group DM. Anyone who can read it may add people.
 #[utoipa::path(post, path = "/v1/conversations/{id}/members", params(("id" = Uuid, Path)),
     request_body = AddConversationMember, responses((status = 204), (status = 403)))]
 pub async fn add_member(
@@ -431,22 +492,36 @@ pub async fn add_member(
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
     let c = load(&mut tx, conversation_id).await?;
-    if !matches!(c.kind, ConversationKind::Public | ConversationKind::Private)
-        || !can_read_now(&mut tx, c.id, auth.user_id).await
-    {
+    if c.kind == ConversationKind::Dm || !can_read_now(&mut tx, c.id, auth.user_id).await {
         return Err(ApiError::Forbidden);
     }
     role_in(&mut tx, c.workspace_id, req.user_id)
         .await
         .map_err(|_| ApiError::BadRequest("not a member of this workspace".into()))?;
+    if c.kind == ConversationKind::GroupDm {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT user_id) FROM access_intervals
+              WHERE conversation_id = $1 AND via = 'membership' AND left_seq IS NULL",
+        )
+        .bind(c.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if count >= 9 {
+            return Err(ApiError::BadRequest(
+                "group DMs hold at most 9 people".into(),
+            ));
+        }
+    }
     if let Some(e) = grant(&mut tx, &c, req.user_id, AccessVia::Membership).await? {
         sync::append(&mut tx, c.workspace_id, vec![e]).await?;
+        rekey_group_dm(&mut tx, c.id).await?;
     }
     tx.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Removes someone's membership of a channel. Owners and admins, or the member themself.
+/// Nobody removes someone else from a DM or group DM; they can only leave.
 #[utoipa::path(delete, path = "/v1/conversations/{id}/members/{user_id}",
     params(("id" = Uuid, Path), ("user_id" = Uuid, Path)), responses((status = 204), (status = 403)))]
 pub async fn remove_member(
@@ -457,11 +532,13 @@ pub async fn remove_member(
     let mut tx = state.pool.begin().await?;
     let c = load(&mut tx, conversation_id).await?;
     let role = role_in(&mut tx, c.workspace_id, auth.user_id).await?;
-    if user_id != auth.user_id && !role.reads_private_channels() {
+    let is_dm = matches!(c.kind, ConversationKind::Dm | ConversationKind::GroupDm);
+    if user_id != auth.user_id && (is_dm || !role.reads_private_channels()) {
         return Err(ApiError::Forbidden);
     }
     if let Some(e) = revoke(&mut tx, c.id, user_id, AccessVia::Membership).await? {
         sync::append(&mut tx, c.workspace_id, vec![e]).await?;
+        rekey_group_dm(&mut tx, c.id).await?;
     }
     tx.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)

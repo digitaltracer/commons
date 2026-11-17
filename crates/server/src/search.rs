@@ -46,19 +46,20 @@ WITH q AS (
            OR (c.kind = 'public' AND wm.role <> 'guest'))
 ), hits AS (
     SELECT 'message' AS kind, m.conversation_id, m.id AS message_id, NULL::uuid AS file_id,
-           NULL::text AS file_name, m.body AS doc, m.search AS vec, m.created_at
+           NULL::text AS file_name, m.body AS doc, m.search AS vec, m.created_at, m.author_id,
+           m.thread_root_id
       FROM messages m, q
      WHERE m.conversation_id IN (SELECT id FROM readable)
        AND NOT m.deleted AND m.search @@ q.query
     UNION ALL
     SELECT 'file_name', f.conversation_id, f.message_id, f.id, f.name, f.name, f.name_search,
-           m.created_at
+           m.created_at, m.author_id, m.thread_root_id
       FROM files f JOIN messages m ON m.id = f.message_id, q
      WHERE f.conversation_id IN (SELECT id FROM readable)
        AND NOT m.deleted AND f.name_search @@ q.query
     UNION ALL
     SELECT 'file_text', f.conversation_id, f.message_id, f.id, f.name, f.extracted_text,
-           f.text_search, m.created_at
+           f.text_search, m.created_at, m.author_id, m.thread_root_id
       FROM files f JOIN messages m ON m.id = f.message_id, q
      WHERE f.conversation_id IN (SELECT id FROM readable)
        AND NOT m.deleted AND f.text_search @@ q.query
@@ -68,7 +69,7 @@ WITH q AS (
      LIMIT $4 OFFSET $5
 )
 SELECT page.kind, page.conversation_id, r.name AS conversation_name, page.message_id,
-       page.file_id, page.file_name, page.created_at,
+       page.file_id, page.file_name, page.created_at, page.author_id, page.thread_root_id,
        ts_headline('commons_search', page.doc, q.query,
                    'StartSel=' || chr(2) || ', StopSel=' || chr(3)
                    || ', MaxWords=24, MinWords=8, MaxFragments=2, FragmentDelimiter=" … "')
@@ -121,6 +122,8 @@ pub async fn search(
                 file_name: r.try_get("file_name")?,
                 snippet: r.try_get("snippet")?,
                 created_at_ms: crate::db::ms(r.try_get("created_at")?),
+                author_id: r.try_get("author_id")?,
+                thread_root_id: r.try_get("thread_root_id")?,
             })
         })
         .collect()

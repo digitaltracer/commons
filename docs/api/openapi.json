@@ -226,11 +226,41 @@
       }
     },
     "/v1/conversations/{id}/members": {
+      "get": {
+        "tags": [
+          "crate::conversations"
+        ],
+        "summary": "Current members of a conversation: open membership intervals of current workspace\nmembers, with their workspace profile. Only someone who can read it now may list them.",
+        "operationId": "list_members",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberList"
+                }
+              }
+            }
+          },
+          "403": {}
+        }
+      },
       "post": {
         "tags": [
           "crate::conversations"
         ],
-        "summary": "Adds a workspace member to a channel. Anyone who can read the channel may add people.",
+        "summary": "Adds a workspace member to a channel or group DM. Anyone who can read it may add people.",
         "operationId": "add_member",
         "parameters": [
           {
@@ -264,7 +294,7 @@
         "tags": [
           "crate::conversations"
         ],
-        "summary": "Removes someone's membership of a channel. Owners and admins, or the member themself.",
+        "summary": "Removes someone's membership of a channel. Owners and admins, or the member themself.\nNobody removes someone else from a DM or group DM; they can only leave.",
         "operationId": "remove_member",
         "parameters": [
           {
@@ -1653,6 +1683,14 @@
           "created_at_ms"
         ],
         "properties": {
+          "author_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Author of the message, or of the message that carries the file."
+          },
           "conversation_id": {
             "type": "string",
             "format": "uuid"
@@ -1694,6 +1732,14 @@
           "snippet": {
             "type": "string",
             "description": "Snippet text; matched terms are wrapped in U+0002 … U+0003. Render as text only."
+          },
+          "thread_root_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Set when the hit is a thread reply."
           }
         }
       },
