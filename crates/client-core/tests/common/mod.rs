@@ -105,6 +105,15 @@ pub fn account(srv: &TestServer, p: &Person, dir: &Path) -> Account {
 }
 
 pub fn account_with_store(srv: &TestServer, p: &Person, store: Arc<dyn Storage>) -> Account {
+    account_full(srv, p, store, Arc::new(RecordingNotifier::default()))
+}
+
+pub fn account_full(
+    srv: &TestServer,
+    p: &Person,
+    store: Arc<dyn Storage>,
+    notifier: Arc<RecordingNotifier>,
+) -> Account {
     Account::new(
         AccountConfig {
             id: Uuid::now_v7(),
@@ -115,9 +124,23 @@ pub fn account_with_store(srv: &TestServer, p: &Person, store: Arc<dyn Storage>)
         Arc::new(HttpTransport::new(&srv.base_url)),
         store,
         Some(p.token.clone()),
-        Arc::new(RecordingNotifier::default()),
+        notifier,
         Arc::new(|_: Uuid, _: AccountEvent| {}),
     )
+}
+
+pub fn memory() -> Arc<dyn Storage> {
+    Arc::new(SqliteStore::in_memory().unwrap())
+}
+
+/// Runs every queued notify job now.
+pub async fn run_jobs(srv: &TestServer) {
+    while let Some(job) = server::jobs::claim(srv.pool(), std::time::Duration::from_secs(30))
+        .await
+        .unwrap()
+    {
+        server::jobs::run_one(&srv.state, job).await;
+    }
 }
 
 pub async fn eventually<F: FnMut() -> bool>(what: &str, mut f: F) {
