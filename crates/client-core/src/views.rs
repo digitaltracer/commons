@@ -1,8 +1,12 @@
 //! Turns cached state into the view models the UI renders.
 use std::collections::HashMap;
 
-use proto::model::{ConversationKind, FileInfo, Message};
-use proto::view::{AttachmentView, ConversationView, MessageView, SendState, WorkspaceView};
+use proto::api::{SNIPPET_START, SNIPPET_STOP, SearchHit};
+use proto::model::{Conversation, ConversationKind, FileInfo, Message};
+use proto::view::{
+    AttachmentView, ConversationView, MessageView, SearchHitView, SendState, SnippetPart,
+    WorkspaceView,
+};
 use uuid::Uuid;
 
 use crate::store::{OutboxItem, OutboxKind, OutboxState, Storage, WindowItem};
@@ -118,6 +122,82 @@ pub fn window_views(
         .collect())
 }
 
+/// "#name" for channels; the other members' names for DMs.
+pub fn conversation_title(c: &Conversation, names: &HashMap<Uuid, String>, me: Uuid) -> String {
+    match c.kind {
+        ConversationKind::Public | ConversationKind::Private => {
+            format!("#{}", c.name.clone().unwrap_or_default())
+        }
+        ConversationKind::Dm | ConversationKind::GroupDm => {
+            let others: Vec<String> = c
+                .dm_user_ids
+                .iter()
+                .filter(|u| **u != me)
+                .map(|u| names.get(u).cloned().unwrap_or_else(|| "Unknown".into()))
+                .collect();
+            if others.is_empty() {
+                "Just you".into()
+            } else {
+                others.join(", ")
+            }
+        }
+    }
+}
+
+/// Splits a server snippet at its U+0002 / U+0003 markers.
+pub fn snippet_parts(snippet: &str) -> Vec<SnippetPart> {
+    let mut parts = vec![];
+    let mut hit = false;
+    let mut text = String::new();
+    for ch in snippet.chars() {
+        let toggle = match ch {
+            SNIPPET_START => Some(true),
+            SNIPPET_STOP => Some(false),
+            _ => None,
+        };
+        match toggle {
+            Some(next) => {
+                if !text.is_empty() {
+                    parts.push(SnippetPart {
+                        text: std::mem::take(&mut text),
+                        hit,
+                    });
+                }
+                hit = next;
+            }
+            None => text.push(ch),
+        }
+    }
+    if !text.is_empty() {
+        parts.push(SnippetPart { text, hit });
+    }
+    parts
+}
+
+pub fn search_hit_view(
+    store: &dyn Storage,
+    me: Uuid,
+    names: &HashMap<Uuid, String>,
+    h: &SearchHit,
+) -> anyhow::Result<SearchHitView> {
+    let cached = store.conversation(h.conversation_id)?;
+    let joined = matches!(cached, Some((_, Some(_))));
+    let conversation_title = match &cached {
+        Some((c, Some(_))) => conversation_title(c, names, me),
+        _ => format!("#{}", h.conversation_name.clone().unwrap_or_default()),
+    };
+    Ok(SearchHitView {
+        kind: h.kind,
+        conversation_id: h.conversation_id,
+        conversation_title,
+        joined,
+        message_id: h.message_id,
+        file_name: h.file_name.clone(),
+        snippet: snippet_parts(&h.snippet),
+        created_at_ms: h.created_at_ms,
+    })
+}
+
 pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<WorkspaceView>> {
     let mut out = vec![];
     for (w, _) in store.workspaces()? {
@@ -132,24 +212,7 @@ pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<Work
             if access.is_none() {
                 continue;
             }
-            let title = match c.kind {
-                ConversationKind::Public | ConversationKind::Private => {
-                    format!("#{}", c.name.clone().unwrap_or_default())
-                }
-                ConversationKind::Dm | ConversationKind::GroupDm => {
-                    let others: Vec<String> = c
-                        .dm_user_ids
-                        .iter()
-                        .filter(|u| **u != me)
-                        .map(|u| names.get(u).cloned().unwrap_or_else(|| "Unknown".into()))
-                        .collect();
-                    if others.is_empty() {
-                        "Just you".into()
-                    } else {
-                        others.join(", ")
-                    }
-                }
-            };
+            let title = conversation_title(&c, &names, me);
             let (unread, mentions) = store.unread(c.id, me)?;
             conversations.push(ConversationView {
                 id: c.id,
@@ -167,4 +230,26 @@ pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<Work
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippets_split_at_markers() {
+        let p = snippet_parts("meet at the \u{2}café\u{3} on \u{2}Tuesday\u{3}");
+        let got: Vec<(&str, bool)> = p.iter().map(|p| (p.text.as_str(), p.hit)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("meet at the ", false),
+                ("café", true),
+                (" on ", false),
+                ("Tuesday", true)
+            ]
+        );
+        assert!(snippet_parts("").is_empty());
+        assert_eq!(snippet_parts("<b>x</b>")[0].text, "<b>x</b>");
+    }
 }

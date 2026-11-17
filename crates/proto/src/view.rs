@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::SearchHitKind;
 use crate::model::{ConversationKind, Entity, Reaction, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +104,26 @@ pub struct DraftView {
     pub message_id: Option<Uuid>,
     pub body: String,
     pub reason: DraftReason,
+}
+
+/// A run of snippet text; `hit` marks the matched terms. Rendered as text only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnippetPart {
+    pub text: String,
+    pub hit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHitView {
+    pub kind: SearchHitKind,
+    pub conversation_id: Uuid,
+    pub conversation_title: String,
+    /// False for a public channel the user can search but has not joined.
+    pub joined: bool,
+    pub message_id: Option<Uuid>,
+    pub file_name: Option<String>,
+    pub snippet: Vec<SnippetPart>,
+    pub created_at_ms: i64,
 }
 
 /// Low-volume app events pushed over the app channel. Message rows travel only in windows.

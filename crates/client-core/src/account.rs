@@ -1101,6 +1101,35 @@ impl Account {
         &self.notifier
     }
 
+    // ---- search ----
+
+    /// Searches a workspace on the server, which filters by what this user can read now.
+    pub async fn search(
+        &self,
+        workspace_id: Uuid,
+        query: &str,
+    ) -> Result<Vec<proto::view::SearchHitView>, SyncError> {
+        let r: proto::api::SearchResults = self
+            .api(
+                Method::Get,
+                &format!("/workspaces/{workspace_id}/search"),
+                &[("q", query.to_string())],
+                None::<&()>,
+                None,
+            )
+            .await?;
+        let names: HashMap<Uuid, String> = self
+            .store
+            .members(workspace_id)?
+            .into_iter()
+            .map(|m| (m.user_id, m.display_name))
+            .collect();
+        Ok(r.hits
+            .iter()
+            .map(|h| views::search_hit_view(&*self.store, self.user.id, &names, h))
+            .collect::<anyhow::Result<_>>()?)
+    }
+
     // ---- files ----
 
     /// Streams a local file to a conversation. Uploads go straight to the server, not
