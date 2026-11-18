@@ -217,6 +217,20 @@ impl Session {
         Ok(())
     }
 
+    async fn wakeup(
+        &mut self,
+        w: Wakeup,
+        rx: &mut tokio::sync::mpsc::Receiver<Wakeup>,
+        pending: &mut Option<Wakeup>,
+    ) -> Result<(), Stop> {
+        match w {
+            Wakeup::Batch(b) => self.batch(b, rx, pending).await,
+            Wakeup::User => self.drain_user().await,
+            Wakeup::Ephemeral(e) => self.ephemeral(e).await,
+            Wakeup::Repair => self.drain_all().await,
+        }
+    }
+
     async fn drain_user(&mut self) -> Result<(), Stop> {
         crate::ws::drain_user_stream(self).await
     }
@@ -348,26 +362,27 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         loop {
             let mut before: Vec<Uuid> = session.workspaces.keys().copied().collect();
             before.sort();
-            let next = pending.take();
-            tokio::select! {
-                _ = reg.cancel.cancelled() => return Err(Stop::Disconnect),
-                w = async { match next { Some(w) => Some(w), None => reg.rx.recv().await } } => match w {
-                    Some(Wakeup::Batch(b)) => session.batch(b, &mut reg.rx, &mut pending).await?,
-                    Some(Wakeup::User) => session.drain_user().await?,
-                    Some(Wakeup::Ephemeral(e)) => session.ephemeral(e).await?,
-                    Some(Wakeup::Repair) => session.drain_all().await?,
-                    None => return Err(Stop::Disconnect),
-                },
-                msg = stream.next() => match msg {
-                    Some(Ok(WsMessage::Text(t))) => {
-                        if let Ok(f) = serde_json::from_str::<ClientFrame>(&t) {
-                            session.client_frame(f).await;
+            // A wakeup set aside while chaining batches goes first, before waiting again.
+            if let Some(w) = pending.take() {
+                session.wakeup(w, &mut reg.rx, &mut pending).await?;
+            } else {
+                tokio::select! {
+                    _ = reg.cancel.cancelled() => return Err(Stop::Disconnect),
+                    w = reg.rx.recv() => match w {
+                        Some(w) => session.wakeup(w, &mut reg.rx, &mut pending).await?,
+                        None => return Err(Stop::Disconnect),
+                    },
+                    msg = stream.next() => match msg {
+                        Some(Ok(WsMessage::Text(t))) => {
+                            if let Ok(f) = serde_json::from_str::<ClientFrame>(&t) {
+                                session.client_frame(f).await;
+                            }
                         }
-                    }
-                    Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => return Ok(()),
-                    Some(Ok(_)) => {}
-                },
-                _ = repair.tick() => session.drain_all().await?,
+                        Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => return Ok(()),
+                        Some(Ok(_)) => {}
+                    },
+                    _ = repair.tick() => session.drain_all().await?,
+                }
             }
             let mut after: Vec<Uuid> = session.workspaces.keys().copied().collect();
             after.sort();
