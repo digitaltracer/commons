@@ -342,3 +342,43 @@ async fn a_refused_invite_costs_no_password_hash() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(hashes(), before + 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invite_from_a_demoted_admin_is_refused() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let admin_inv = invite(&srv, &owner, w.id, "member").await;
+    let (s, v) = try_register(&srv, "ada@example.org", Some(&admin_inv.token)).await;
+    assert_eq!(s, 200, "{v}");
+    let ada = Person {
+        token: v["token"].as_str().unwrap().into(),
+        id: v["user"]["id"].as_str().unwrap().parse().unwrap(),
+        email: "ada@example.org".into(),
+    };
+    let role = format!("/workspaces/{}/members/{}", w.id, ada.id);
+    ok(
+        &srv,
+        Method::PATCH,
+        &owner,
+        &role,
+        Some(serde_json::json!({"role": "admin"})),
+    )
+    .await;
+    let from_ada = invite(&srv, &ada, w.id, "member").await;
+
+    ok(
+        &srv,
+        Method::PATCH,
+        &owner,
+        &role,
+        Some(serde_json::json!({"role": "member"})),
+    )
+    .await;
+    let (s, v) = try_register(&srv, "late@example.org", Some(&from_ada.token)).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (403, Some("invite_revoked")),
+        "{v}"
+    );
+}

@@ -179,10 +179,16 @@ pub async fn prepare(conn: &mut PgConnection, raw: &str) -> ApiResult<Valid> {
         .await?
         .ok_or_else(invalid)?;
     sync::lock_workspace(conn, workspace_id).await?;
+    // An invite lapses with its creator's authority: it counts as revoked once they are no
+    // longer an owner or admin of the workspace.
     let (hash, role, expired, used, revoked, name): (Vec<u8>, String, bool, bool, bool, String) =
         sqlx::query_as(
             "SELECT i.token_hash, i.role, i.expires_at <= now(), i.used_at IS NOT NULL,
-                    i.revoked_at IS NOT NULL, w.name
+                    i.revoked_at IS NOT NULL OR NOT EXISTS (
+                        SELECT 1 FROM workspace_members wm
+                         WHERE wm.workspace_id = i.workspace_id AND wm.user_id = i.created_by
+                           AND wm.left_seq IS NULL AND wm.role IN ('owner', 'admin')),
+                    w.name
                FROM invites i JOIN workspaces w ON w.id = i.workspace_id
               WHERE i.id = $1 FOR UPDATE OF i",
         )
