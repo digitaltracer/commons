@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use server::feed::{Batch, RawEvent};
+use server::feed::Batch;
 use server::hub::Ephemeral;
 use uuid::Uuid;
 
