@@ -324,8 +324,13 @@ impl Core {
     /// session may still be active.
     pub async fn remove_account(self: &Arc<Self>, id: Uuid) -> anyhow::Result<bool> {
         let server_url = self.account(id).ok().map(|a| a.server_url.clone());
-        let revoked = match (server_url, self.secrets.get(id).unwrap_or(None)) {
-            (Some(url), Some(token)) => {
+        let token = self.secrets.get(id).map_err(|e| {
+            tracing::warn!(account = %id, error = %e, "keychain read failed; cannot log out");
+        });
+        let revoked = match (server_url, token) {
+            // The token could not be read, so its session could not be ended.
+            (_, Err(())) => false,
+            (Some(url), Ok(Some(token))) => {
                 let transport = (self.transports)(&url);
                 let logout = call::<serde_json::Value>(
                     &*transport,

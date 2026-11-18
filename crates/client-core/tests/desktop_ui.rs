@@ -486,3 +486,47 @@ async fn register_with_invite(srv: &server::testing::TestServer, link: &str) -> 
     assert_eq!(s, 200, "{v}");
     email
 }
+
+/// A keychain whose reads fail, as when access to it is refused.
+#[derive(Default)]
+struct UnreadableSecrets(MemorySecrets);
+
+impl SecretStore for UnreadableSecrets {
+    fn get(&self, _: Uuid) -> anyhow::Result<Option<String>> {
+        anyhow::bail!("keychain access refused")
+    }
+    fn set(&self, id: Uuid, token: &str) -> anyhow::Result<()> {
+        self.0.set(id, token)
+    }
+    fn delete(&self, id: Uuid) -> anyhow::Result<()> {
+        self.0.delete(id)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keychain_read_error_reports_the_session_as_maybe_active() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = srv.base_url.clone();
+    let core = Core::open(
+        dir.path(),
+        Arc::new(UnreadableSecrets::default()),
+        Arc::new(RecordingNotifier::default()),
+        Arc::new(move |_: &str| Arc::new(HttpTransport::new(&url)) as Arc<dyn Transport>),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let id = core
+        .add_account(
+            &srv.base_url,
+            &alice.user.email,
+            "correct horse battery",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!core.remove_account(id).await.unwrap(), "not revoked");
+    assert!(core.account(id).is_err(), "still removed here");
+}
