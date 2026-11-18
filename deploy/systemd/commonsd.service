@@ -1,0 +1,39 @@
+# commonsd on a host with its own PostgreSQL and nginx. See docs/deploy.md.
+[Unit]
+Description=Commons server (commonsd)
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=commons
+Group=commons
+EnvironmentFile=/etc/commons/commonsd.env
+ExecStart=/usr/local/bin/commonsd
+WorkingDirectory=/var/lib/commons
+# commonsd shuts down gracefully on SIGINT.
+KillSignal=SIGINT
+Restart=always
+RestartSec=2
+
+StateDirectory=commons
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/commons
+
+CPUQuota=200%
+MemoryMax=4G
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+# Install as /etc/commons/commonsd.env (root:commons, mode 0640). Placeholders only here.
+# Every COMMONS_* variable commonsd reads is listed. An empty or unset value means the default.
+
+# The host's PostgreSQL 16 on port 5433, `commons` role and database. URL-encode the password,
+# or generate a URL-safe one: openssl rand -hex 24
+COMMONS_DATABASE_URL=postgres://commons:change-me@127.0.0.1:5433/commons
+
+# Loopback only; nginx proxies commons.adarshnb.com here.
+COMMONS_BIND=127.0.0.1:8090
+
+# The URL clients and links use. TLS ends at nginx.
+COMMONS_PUBLIC_URL=https://commons.adarshnb.com
+
+# Uploaded files, under the unit's StateDirectory.
+COMMONS_FILES_DIR=/var/lib/commons/files
+
+# Who may create an account: open (anyone, the default), closed (no one) or allowlist.
+COMMONS_REGISTRATION=allowlist
+# allowlist only: comma-separated emails, compared trimmed and lowercased.
+COMMONS_REGISTRATION_ALLOWLIST=you@example.com
+
+# Test-box limits. 100 MiB per file; keep nginx's client_max_body_size (100m) in step.
+COMMONS_MAX_FILE_BYTES=104857600
+# 2 GiB of uploads per user.
+COMMONS_USER_QUOTA_BYTES=2147483648
+
+# Outgoing mail, for password reset. Unset here: reset requests are accepted but no email is
+# sent, so password reset is off. Example: smtps://user:password@smtp.example.com:465
+COMMONS_SMTP_URL=
+# Sender for that mail. Default: Commons <no-reply@localhost>
+COMMONS_MAIL_FROM=
+
+# S3-compatible file storage instead of COMMONS_FILES_DIR; credentials, region and endpoint
+# come from the AWS_* variables. Unset: files stay on local disk.
+COMMONS_S3_BUCKET=
+
+# Log filter (tracing EnvFilter syntax). Logs go to the journal.
+RUST_LOG=info
