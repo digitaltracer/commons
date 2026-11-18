@@ -17,6 +17,8 @@ use crate::hub::{self, Ephemeral, Wakeup};
 use crate::{AppState, conversations, sync};
 
 const PAGE: i64 = 200;
+/// Queued feed batches filtered together, at most.
+const CHAIN: usize = 8;
 
 pub async fn upgrade(
     State(state): State<AppState>,
@@ -149,8 +151,15 @@ impl Session {
     }
 
     /// Delivers a feed batch: filtered in memory when it continues this socket's cursor,
-    /// otherwise the socket catches up through its own replay.
-    async fn batch(&mut self, b: std::sync::Arc<crate::feed::Batch>) -> Result<(), Stop> {
+    /// otherwise the socket catches up through its own replay. Batches for the same workspace
+    /// already queued behind it are filtered with it; the first other wakeup is kept in
+    /// `pending` so wakeups stay in order.
+    async fn batch(
+        &mut self,
+        b: std::sync::Arc<crate::feed::Batch>,
+        rx: &mut tokio::sync::mpsc::Receiver<Wakeup>,
+        pending: &mut Option<Wakeup>,
+    ) -> Result<(), Stop> {
         let Some(&cursor) = self.workspaces.get(&b.workspace_id) else {
             return Ok(());
         };
@@ -168,25 +177,40 @@ impl Session {
                 .fetch_add(1, Ordering::Relaxed);
             return self.drain_workspace(b.workspace_id).await;
         };
+        let mut chain = vec![b];
+        while chain.len() < CHAIN && pending.is_none() {
+            match rx.try_recv() {
+                Ok(Wakeup::Batch(next))
+                    if next.workspace_id == chain[0].workspace_id
+                        && chain.last().is_some_and(|l| next.from == l.to) =>
+                {
+                    chain.push(next)
+                }
+                Ok(other) => *pending = Some(other),
+                Err(_) => break,
+            }
+        }
         self.state
             .hub
             .batches_filtered
-            .fetch_add(1, Ordering::Relaxed);
-        let (events, end) = access.filter(&b, self.user_id);
+            .fetch_add(chain.len() as u64, Ordering::Relaxed);
+        let workspace_id = chain[0].workspace_id;
+        let to = chain.last().map_or(cursor, |l| l.to);
+        let (events, end) = access.filter_chain(&chain, self.user_id);
         let Some(events) = events else {
-            self.workspaces.remove(&b.workspace_id);
-            self.access.remove(&b.workspace_id);
+            self.workspaces.remove(&workspace_id);
+            self.access.remove(&workspace_id);
             return Ok(());
         };
         let frame = format!(
             r#"{{"type":"workspace","workspace_id":"{}","events":[{}],"next_since":{}}}"#,
-            b.workspace_id,
+            workspace_id,
             events.join(","),
-            b.to
+            to
         );
         self.send_text(frame).await?;
-        self.workspaces.insert(b.workspace_id, b.to);
-        self.access.insert(b.workspace_id, end);
+        self.workspaces.insert(workspace_id, to);
+        self.access.insert(workspace_id, end);
         Ok(())
     }
 
@@ -310,15 +334,17 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         publish_presence(&state, user_id, &ws_ids, true).await;
     }
     let mut repair = tokio::time::interval(state.config.repair_interval);
+    let mut pending: Option<Wakeup> = None;
     let result: Result<(), Stop> = async {
         session.drain_all().await?;
         loop {
             let mut before: Vec<Uuid> = session.workspaces.keys().copied().collect();
             before.sort();
+            let next = pending.take();
             tokio::select! {
                 _ = reg.cancel.cancelled() => return Err(Stop::Disconnect),
-                w = reg.rx.recv() => match w {
-                    Some(Wakeup::Batch(b)) => session.batch(b).await?,
+                w = async { match next { Some(w) => Some(w), None => reg.rx.recv().await } } => match w {
+                    Some(Wakeup::Batch(b)) => session.batch(b, &mut reg.rx, &mut pending).await?,
                     Some(Wakeup::User) => session.drain_user().await?,
                     Some(Wakeup::Ephemeral(e)) => session.ephemeral(e).await?,
                     Some(Wakeup::Repair) => session.drain_all().await?,

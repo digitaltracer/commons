@@ -201,8 +201,19 @@ impl Access {
     /// read the conversation at the batch's watermark. Returns the events to send and the
     /// access state after the batch, or `None` when the user is no longer a member.
     pub fn filter<'a>(&self, batch: &'a Batch, user: Uuid) -> (Option<Vec<&'a str>>, Access) {
+        self.filter_chain(std::slice::from_ref(batch), user)
+    }
+
+    /// Filters consecutive batches as one range, judged by access at the end of the last
+    /// one, so a removal already queued behind a batch withholds that batch's content.
+    pub fn filter_chain<'a, B: std::borrow::Borrow<Batch>>(
+        &self,
+        batches: &'a [B],
+        user: Uuid,
+    ) -> (Option<Vec<&'a str>>, Access) {
+        let events = || batches.iter().flat_map(|b| b.borrow().events.iter());
         let mut end = self.clone();
-        for e in &batch.events {
+        for e in events() {
             end.step(e, user);
         }
         if !end.active {
@@ -210,7 +221,7 @@ impl Access {
         }
         let mut at = self.clone();
         let mut out = vec![];
-        for e in &batch.events {
+        for e in events() {
             let deliver = match e.audience {
                 0 => true,
                 _ if e.subject == Some(user) => true,
