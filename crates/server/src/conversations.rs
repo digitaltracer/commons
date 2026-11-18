@@ -323,11 +323,10 @@ pub async fn create_channel(
     let c = create(&mut tx, workspace_id, req.kind, Some(&name), None, false).await?;
     let mut events = vec![];
     if c.kind == ConversationKind::Public {
-        events.push(NewEvent::workspace(
-            WorkspaceEventBody::ConversationCreated {
-                conversation: c.clone(),
-            },
-        ));
+        // Guests cannot browse public channels, so they don't hear of new ones.
+        events.push(NewEvent::members(WorkspaceEventBody::ConversationCreated {
+            conversation: c.clone(),
+        }));
     }
     events.extend(grant(&mut tx, &c, auth.user_id, AccessVia::Membership).await?);
     if c.kind == ConversationKind::Private {

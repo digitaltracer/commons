@@ -22,6 +22,7 @@ fn message(seq: i64, conv: Uuid) -> RawEvent {
         membership: None,
         left: None,
         joined: None,
+        guest: None,
         json: format!(r#"{{"seq":{seq},"body":{{"type":"message_posted","marker":"queued"}}}}"#),
     }
 }
@@ -35,6 +36,7 @@ fn removal(seq: i64, conv: Uuid, user: Uuid) -> RawEvent {
         membership: Some((conv, user, false, false)),
         left: None,
         joined: None,
+        guest: None,
         json: format!(r#"{{"seq":{seq},"body":{{"type":"member_removed","marker":"removal"}}}}"#),
     }
 }

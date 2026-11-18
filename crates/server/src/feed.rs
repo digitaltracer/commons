@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use proto::events::{WorkspaceEvent, WorkspaceEventBody};
+use proto::model::Role;
 use sqlx::Row;
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -26,6 +27,8 @@ pub struct RawEvent {
     /// `workspace_member_left`: the user who left.
     pub left: Option<Uuid>,
     pub joined: Option<Uuid>,
+    /// A join or role change: the user, and whether they are now a guest.
+    pub guest: Option<(Uuid, bool)>,
     pub json: String,
 }
 
@@ -149,6 +152,15 @@ async fn read(state: &AppState, workspace_id: Uuid, from: i64) -> anyhow::Result
             WorkspaceEventBody::WorkspaceMemberJoined { member } => Some(member.user_id),
             _ => None,
         };
+        let guest = match &body {
+            WorkspaceEventBody::WorkspaceMemberJoined { member } => {
+                Some((member.user_id, member.role == Role::Guest))
+            }
+            WorkspaceEventBody::MemberRoleChanged { user_id, role } => {
+                Some((*user_id, *role == Role::Guest))
+            }
+            _ => None,
+        };
         let json = serde_json::to_string(&WorkspaceEvent { seq, body })?;
         events.push(RawEvent {
             seq,
@@ -158,6 +170,7 @@ async fn read(state: &AppState, workspace_id: Uuid, from: i64) -> anyhow::Result
             membership,
             left,
             joined,
+            guest,
             json,
         });
     }
@@ -175,6 +188,7 @@ async fn read(state: &AppState, workspace_id: Uuid, from: i64) -> anyhow::Result
 pub struct Access {
     pub open: std::collections::HashSet<Uuid>,
     pub active: bool,
+    pub guest: bool,
 }
 
 impl Access {
@@ -193,6 +207,11 @@ impl Access {
         }
         if e.joined == Some(user) {
             self.active = true;
+        }
+        if let Some((u, guest)) = e.guest
+            && u == user
+        {
+            self.guest = guest;
         }
     }
 
@@ -228,6 +247,7 @@ impl Access {
                 1 => e
                     .conversation_id
                     .is_some_and(|c| at.open.contains(&c) && end.open.contains(&c)),
+                3 => !end.guest,
                 _ => false,
             };
             at.step(e, user);
@@ -255,16 +275,17 @@ pub async fn load_access(
     .bind(user_id)
     .fetch_all(&mut *conn)
     .await?;
-    let active: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = $1
-            AND user_id = $2 AND left_seq IS NULL)",
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM workspace_members WHERE workspace_id = $1
+            AND user_id = $2 AND left_seq IS NULL",
     )
     .bind(workspace_id)
     .bind(user_id)
-    .fetch_one(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await?;
     Ok(Access {
         open: open.into_iter().collect(),
-        active,
+        active: role.is_some(),
+        guest: role.as_deref() == Some("guest"),
     })
 }

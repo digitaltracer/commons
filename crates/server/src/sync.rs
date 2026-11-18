@@ -38,6 +38,8 @@ pub enum Audience {
     Conversation = 1,
     /// Only `subject_user_id`.
     Subject = 2,
+    /// Every current member who is not a guest.
+    Members = 3,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,14 @@ impl NewEvent {
         NewEvent {
             body,
             audience: Audience::Workspace,
+            subject_user_id: None,
+            interval_id: None,
+        }
+    }
+    pub fn members(body: WorkspaceEventBody) -> Self {
+        NewEvent {
+            body,
+            audience: Audience::Members,
             subject_user_id: None,
             interval_id: None,
         }
@@ -249,6 +259,10 @@ pub async fn read_workspace_page(
           AND (
                e.audience = 0
             OR e.subject_user_id = $4
+            OR (e.audience = 3
+                AND EXISTS (SELECT 1 FROM workspace_members wm
+                             WHERE wm.workspace_id = $1 AND wm.user_id = $4
+                               AND wm.left_seq IS NULL AND wm.role <> 'guest'))
             OR (e.audience = 1
                 AND EXISTS (SELECT 1 FROM access_intervals ai
                              WHERE ai.conversation_id = e.conversation_id AND ai.user_id = $4
