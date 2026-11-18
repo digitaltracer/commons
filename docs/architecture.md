@@ -482,3 +482,64 @@ A fourth implementer pulled part of step 6 forward on `ec1094c`, so the server c
 - Invites, the admin UI, first-run setup, backup and restore commands (the runbook uses `pg_dump` and `tar`), and metrics are still step 6.
 - Neither side sends WebSocket pings, so nginx closes a socket that stays quiet for 1 h, and the client reconnects.
 - The build left about 4 GB of BuildKit cache on this Mac. I did not prune it.
+
+## Review (2026-11-18)
+
+Two independent reviewers reviewed the change from `09e136f` to `2848da9`, and the orchestrator verified every finding in the code. All twelve verified findings were fixed, in two rounds, from `2848da9` to `f3a24f9`. The full report is in the task folder.
+
+**Plan amendments**
+
+- **Sessions (decision 14).**
+  - Revoking a session closes its open sockets on every node. This is a v1 invariant now, not left to step 6.
+  - Desktop sign-out revokes the session on the server.
+  - Session expiry is still to come.
+- **Access (decision 10).**
+  - Every path that changes membership takes a per-workspace advisory lock first. Locking the workspace row first would deadlock against `revoke`.
+  - Notification content and queued socket batches are filtered by current access when sent, and the cursor still advances past what is dropped.
+- **Extraction (decision 13).** Text extraction runs in a child process that is killed on timeout. The job lease is longer than the timeout, and a timed-out extraction is not retried.
+- **Registration.** The allowlist is gone. The modes are `open`, `closed` and `invite`. The first account on an empty server may register without an invite. Invites are:
+  - single-use, expiring and revocable;
+  - stored only as a token hash;
+  - sent as links of the form `/invite#token`, so the secret is never in a request path;
+  - void once their creator is no longer an owner or admin.
+- **Proxying.** nginx sets the forwarding headers in every location. `COMMONS_TRUSTED_PROXIES` names which proxies' headers the server trusts.
+- **Priorities, from the user after the plan was written:**
+  - Mac first.
+  - SMTP skipped. OIDC, invite links and an admin password reset cover the pilot.
+  - Multi-platform support late.
+  - Backups and monitoring after that.
+  - The memory budget is measured as physical footprint.
+
+**Known issues, accepted below the fix threshold** (likelihood × severity):
+
+| Issue | Score |
+|---|---|
+| An idempotent send replay skips the access check | 3×3 |
+| A very late manual retry can duplicate a message | 1×3 |
+| A crash mid-upload can leave an orphaned object | 2×3 |
+| A window's first batch can exceed the byte cap | 2×2 |
+| A typing frame can reach a just-removed member during queue lag | 4×2 |
+
+**Residue from the final check, recommended for a short follow-up:**
+
+| Residue | Score |
+|---|---|
+| The set-aside wakeup queue is unbounded, and cancellation is unchecked while it drains (C6) | 2–3 × 5–6 |
+| A set-aside removal is missed by an earlier set-aside batch | 2×4 |
+| The session recheck races, and is skipped on a database error | 3 × 3–5 |
+| Registration hashes inside its transaction | 3×5 |
+| The presence seed races hub registration | 3×2 |
+
+**Closing check, per criterion, at `f3a24f9`**
+
+| Criterion | Status |
+|---|---|
+| C1 | Partial: no OIDC and no first-run setup; invite registration is in place. |
+| C2 | Delivered. |
+| C3 | Delivered. |
+| C4 | Delivered, apart from the narrow socket-backlog residue. |
+| C5 | Delivered. |
+| C6 | At risk until the set-aside queue is bounded. |
+| C7 | Not met: 727 ms p95 locally, with no run on the VPS. |
+| C8 | Partial: the footprint meets the budget; VoiceOver is pending. |
+| C9 | Delivered. |
