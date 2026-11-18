@@ -84,11 +84,15 @@ Then add the account in the desktop app with the server URL `https://commons.ada
 
 ## Inviting people
 
-In invite mode, the first account registers without an invite. Create a workspace, then use **Invite people** in it (owners and admins). Pick member or guest and an expiry (7 days by default); the app creates a link, `https://commons.adarshnb.com/invite#<token>`, and copies it. The token sits in the fragment, which browsers don't send, so it stays out of nginx's access log. Each link works once. Send it to one person:
-- someone new pastes it into **Add a server account**, which fills in the server, and creates their account, joining the workspace in the same step;
-- someone with an account on this server pastes it into **Join with an invite link** in the switcher.
+In invite mode, the first account registers without an invite. Create a workspace, then use **Invite people** in it (owners and admins). Enter the email address of the person you're inviting, pick member or guest and an expiry (7 days by default); the app creates a link, `https://commons.adarshnb.com/invite#<token>`, and copies it. The token sits in the fragment, which browsers don't send, so it stays out of nginx's access log. Each link works once, and only for that email address (compared after trimming and lower-casing). Send it to that person:
+- someone new pastes it into **Add a server account**, which fills in the server, and creates their account with that email address, joining the workspace in the same step. With **Continue with Google**, Google's address must be the invited one and Google must mark it verified;
+- someone with an account on this server under that address pastes it into **Join with an invite link** in the switcher.
 
-Opened in a browser, the link shows a page saying to paste it into the app. The token is shown only when the link is made; the server keeps its hash. Owners and admins list and revoke invites through `GET` and `DELETE /v1/workspaces/{id}/invites`.
+Anyone else holding the link is refused with `invite_email_mismatch`, "This invite was made for a different email address." The refusal doesn't say which address it was made for. Inviting an address that is already a member of the workspace is refused with `already_member`. Several open invites to the same address are allowed; each works once. Invites made before invites carried an email address are no longer valid: they show as **Not valid** in Manage workspace and are refused as `invite_invalid`, so send a new one.
+
+The server has no mail, so a password sign-up proves only that the person knows the invited address and holds the link, not that they own the mailbox. Google sign-up does check ownership, through the verified flag.
+
+Opened in a browser, the link shows a page saying to paste it into the app. The token is shown only when the link is made; the server keeps its hash. Owners and admins list and revoke invites through `GET` and `DELETE /v1/workspaces/{id}/invites`, and create them with `POST` and `{"email", "role", "expires_in_days"}`.
 
 ## Sign-in with Google (OIDC)
 

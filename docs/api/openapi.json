@@ -165,7 +165,7 @@
             }
           },
           "403": {
-            "description": "registration is closed, or an invite is required, invalid, expired, used or revoked",
+            "description": "registration is closed, or an invite is required, invalid, expired, used, revoked or made for a different email address",
             "content": {
               "application/json": {
                 "schema": {
@@ -611,7 +611,16 @@
               }
             }
           },
-          "403": {},
+          "403": {
+            "description": "the invite is invalid, expired, used or revoked, or was made for a different email address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {}
         }
       }
@@ -1073,7 +1082,20 @@
               }
             }
           },
-          "403": {}
+          "400": {
+            "description": "invalid email, role or expiry"
+          },
+          "403": {},
+          "409": {
+            "description": "already a member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1483,11 +1505,16 @@
       },
       "CreateInvite": {
         "type": "object",
-        "description": "Creates a single-use invite to a workspace. Owners and admins only.",
+        "description": "Creates a single-use invite to a workspace for one email address. Owners and admins only.",
         "required": [
+          "email",
           "role"
         ],
         "properties": {
+          "email": {
+            "type": "string",
+            "description": "Only an account with this email can use the invite."
+          },
           "expires_in_days": {
             "type": [
               "integer",
@@ -1697,6 +1724,13 @@
           "created_by": {
             "type": "string",
             "format": "uuid"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The email it is for, normalised. None on invites made before invites had one; those\nare not valid."
           },
           "expires_at_ms": {
             "type": "integer",
