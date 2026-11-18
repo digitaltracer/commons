@@ -280,10 +280,17 @@ impl Core {
         Ok(id)
     }
 
-    /// Signs an account whose session ended back in, keeping its cache and outbox.
+    /// Signs an account whose session ended back in, keeping its cache and outbox. Errors are
+    /// worded for the person signing in.
     pub async fn sign_in_again(&self, account_id: Uuid, password: &str) -> anyhow::Result<()> {
         let account = self.account(account_id)?;
         let transport = (self.transports)(&account.server_url);
+        let host = account
+            .server_url
+            .split("://")
+            .last()
+            .unwrap_or(&account.server_url)
+            .to_string();
         let session: SessionResponse = call(
             &*transport,
             Method::Post,
@@ -296,7 +303,18 @@ impl Core {
             None,
             None,
         )
-        .await?;
+        .await
+        .map_err(|e| match e.status() {
+            Some(401) => anyhow::anyhow!(
+                "That password didn't work for {}. Check it and try again.",
+                account.user.email
+            ),
+            Some(429) => anyhow::anyhow!("Too many attempts. Wait a minute, then try again."),
+            None => {
+                anyhow::anyhow!("Couldn't reach {host}. Check your connection, then try again.")
+            }
+            Some(_) => e.into(),
+        })?;
         if session.user.id != account.user.id {
             anyhow::bail!("that password signed in a different user");
         }
