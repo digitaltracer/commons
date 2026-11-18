@@ -28,6 +28,8 @@ pub mod sync;
 pub mod ws;
 
 #[cfg(feature = "testing")]
+pub mod fake_oidc;
+#[cfg(feature = "testing")]
 pub mod testing;
 
 use std::sync::Arc;
