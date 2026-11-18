@@ -1,0 +1,8 @@
+.git
+.agents
+target
+**/target
+apps/desktop/gen
+apps/desktop-ui/dist
+deploy/.env
+**/.DS_Store
