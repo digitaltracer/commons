@@ -452,9 +452,19 @@ pub async fn read_user_page(
         });
     }
     let upto = head.min(since + limit.clamp(1, MAX_PAGE));
+    // A notification is delivered only while its message is live and readable now.
     let rows = sqlx::query(
-        "SELECT seq, payload FROM user_events WHERE user_id = $1 AND seq > $2 AND seq <= $3
-          ORDER BY seq",
+        "SELECT ue.seq, ue.payload FROM user_events ue
+          WHERE ue.user_id = $1 AND ue.seq > $2 AND ue.seq <= $3
+            AND (ue.kind <> 'notify' OR EXISTS (
+                SELECT 1 FROM messages m
+                  JOIN access_intervals ai ON ai.conversation_id = m.conversation_id
+                       AND ai.user_id = ue.user_id AND ai.left_seq IS NULL
+                  JOIN workspace_members wm ON wm.workspace_id = m.workspace_id
+                       AND wm.user_id = ue.user_id AND wm.left_seq IS NULL
+                 WHERE m.id = (ue.payload->'notification'->>'message_id')::uuid
+                   AND NOT m.deleted))
+          ORDER BY ue.seq",
     )
     .bind(user_id)
     .bind(since)
