@@ -697,6 +697,7 @@ async fn sign_in(
                 .await
                 .map_err(Refusal::from)?;
             if member.is_none() {
+                invite.check_account(&mut tx, user_id).await?;
                 crate::invites::redeem(&mut tx, &invite, user_id).await?;
             }
         }
@@ -734,6 +735,13 @@ async fn sign_in(
                 )
             })
         })?;
+    // A new account through an invite needs the invited address, verified by the provider.
+    if let Some(invite) = &invite {
+        if !verified {
+            return Err(crate::invites::email_mismatch().into());
+        }
+        invite.check_email(&email)?;
+    }
     let taken = || {
         Refusal(
             "email_taken",

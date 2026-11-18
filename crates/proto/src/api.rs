@@ -160,10 +160,12 @@ pub struct WorkspaceList {
     pub workspaces: Vec<Workspace>,
 }
 
-/// Creates a single-use invite to a workspace. Owners and admins only.
+/// Creates a single-use invite to a workspace for one email address. Owners and admins only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateInvite {
+    /// Only an account with this email can use the invite.
+    pub email: String,
     /// `member` or `guest`.
     pub role: Role,
     /// Days until it expires: 1 to 30, 7 by default.
@@ -176,6 +178,10 @@ pub struct CreateInvite {
 pub struct Invite {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    /// The email it is for, normalised. None on invites made before invites had one; those
+    /// are not valid.
+    #[serde(default)]
+    pub email: Option<String>,
     pub role: Role,
     pub created_by: Uuid,
     pub created_at_ms: i64,

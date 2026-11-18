@@ -22,6 +22,7 @@ pub const CLIENT_SECRET: &str = "test-client-secret";
 pub struct Next {
     pub sub: String,
     pub email: Option<String>,
+    pub email_verified: bool,
     pub name: Option<String>,
     pub nonce: Option<String>,
     pub aud: Option<String>,
@@ -33,6 +34,7 @@ impl Next {
         Next {
             sub: sub.into(),
             email: Some(email.into()),
+            email_verified: true,
             name: Some("Ada Lovelace".into()),
             nonce: None,
             aud: None,
@@ -202,7 +204,7 @@ async fn token(
         "exp": now + next.exp_offset,
         "nonce": next.nonce.unwrap_or(p.nonce),
         "email": next.email,
-        "email_verified": true,
+        "email_verified": next.email_verified,
         "name": next.name,
     });
     let mut header = Header::new(Algorithm::RS256);

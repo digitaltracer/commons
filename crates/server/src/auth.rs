@@ -259,7 +259,8 @@ pub(crate) async fn create_session(
         (status = 200, body = SessionResponse),
         (status = 429),
         (status = 403, description = "registration is closed, or an invite is required, \
-            invalid, expired, used or revoked", body = proto::api::ErrorBody),
+            invalid, expired, used, revoked or made for a different email address",
+            body = proto::api::ErrorBody),
     ))]
 pub async fn register(
     State(state): State<AppState>,
@@ -287,8 +288,12 @@ pub async fn register(
         Some(raw) => Some(crate::invites::prepare(&mut tx, raw).await?),
         None => None,
     };
-    if invite.is_none() && state.config.registration == Registration::Invite {
-        check_bootstrap(&mut tx).await?;
+    match &invite {
+        Some(invite) => invite.check_email(&email)?,
+        None if state.config.registration == Registration::Invite => {
+            check_bootstrap(&mut tx).await?
+        }
+        None => {}
     }
     let password = req.password.clone();
     state

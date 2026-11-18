@@ -30,6 +30,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "oidc and admin",
         include_str!("../migrations/0007_oidc_admin.sql"),
     ),
+    (
+        8,
+        "invite email",
+        include_str!("../migrations/0008_invite_email.sql"),
+    ),
 ];
 
 pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {

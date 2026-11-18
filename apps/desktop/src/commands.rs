@@ -101,12 +101,13 @@ async fn add_account(
         .map_err(refused)
 }
 
-/// Creates a single-use invite link to a workspace (owners and admins).
+/// Creates a single-use invite link to a workspace for one email (owners and admins).
 #[tauri::command]
 async fn create_invite(
     host: State<'_, Host>,
     account_id: Uuid,
     workspace_id: Uuid,
+    email: String,
     role: proto::model::Role,
     expires_in_days: u32,
 ) -> R<proto::api::InviteCreated> {
@@ -116,6 +117,7 @@ async fn create_invite(
         &format!("/workspaces/{workspace_id}/invites"),
         &[],
         Some(&proto::api::CreateInvite {
+            email,
             role,
             expires_in_days: Some(expires_in_days),
         }),
