@@ -78,6 +78,16 @@ pub enum ConnectionState {
     SignedOut,
 }
 
+/// Why an account is signed out, as far as this device can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEnd {
+    /// The server refused the saved session (401).
+    Revoked,
+    /// This device has no session token for the account.
+    NoToken,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountView {
     pub id: Uuid,
@@ -89,6 +99,9 @@ pub struct AccountView {
     /// When the next reconnect attempt is due, while offline.
     #[serde(default)]
     pub reconnect_at_ms: Option<i64>,
+    /// Set while signed out.
+    #[serde(default)]
+    pub session_end: Option<SessionEnd>,
     pub workspaces: Vec<WorkspaceView>,
 }
 

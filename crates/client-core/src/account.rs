@@ -10,7 +10,7 @@ use proto::events::{
     WorkspaceEvent, WorkspaceReplay,
 };
 use proto::model::{Entity, Member, Message, Notification, Preferences, User};
-use proto::view::{AccountView, ConnectionState, DraftReason, DraftView, MessageView};
+use proto::view::{AccountView, ConnectionState, DraftReason, DraftView, MessageView, SessionEnd};
 use proto::window::WindowSpec;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -99,6 +99,7 @@ pub struct Inner {
     notifier: Arc<dyn Notifier>,
     events: EventSink,
     connection: Mutex<ConnectionState>,
+    session_end: Mutex<Option<SessionEnd>>,
     focus: Mutex<Option<Uuid>>,
     wake_backfill: Notify,
     wake_outbox: Notify,
@@ -160,6 +161,7 @@ impl Account {
             notifier,
             events,
             connection: Mutex::new(ConnectionState::Offline),
+            session_end: Mutex::new(None),
             focus: Mutex::new(None),
             wake_backfill: Notify::new(),
             wake_outbox: Notify::new(),
@@ -189,6 +191,11 @@ impl Account {
             .lock()
             .map(|c| c.clone())
             .unwrap_or(ConnectionState::Offline)
+    }
+
+    /// Why the account is signed out, while it is.
+    pub fn session_end(&self) -> Option<SessionEnd> {
+        self.session_end.lock().ok().and_then(|e| *e)
     }
 
     fn set_connection(&self, c: ConnectionState) {
@@ -235,6 +242,7 @@ impl Account {
             user_id: self.user.id,
             connection: self.connection(),
             reconnect_at_ms: self.reconnect_at.lock().ok().and_then(|r| *r),
+            session_end: self.session_end(),
             workspaces: views::workspace_views(&*self.store, self.user.id)?,
         })
     }
@@ -790,6 +798,14 @@ impl Account {
             match result {
                 Ok(()) => backoff = Duration::from_millis(500),
                 Err(SyncError::SignedOut) => {
+                    let has_token = self.token.read().is_ok_and(|t| t.is_some());
+                    if let Ok(mut e) = self.session_end.lock() {
+                        *e = Some(if has_token {
+                            SessionEnd::Revoked
+                        } else {
+                            SessionEnd::NoToken
+                        });
+                    }
                     self.set_connection(ConnectionState::SignedOut);
                     return;
                 }
@@ -825,6 +841,9 @@ impl Account {
     pub fn resume_session(&self, token: String) {
         if let Ok(mut t) = self.token.write() {
             *t = Some(token);
+        }
+        if let Ok(mut e) = self.session_end.lock() {
+            *e = None;
         }
         if self.connection() == ConnectionState::SignedOut {
             self.set_connection(ConnectionState::Connecting);
