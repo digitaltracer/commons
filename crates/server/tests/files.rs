@@ -431,3 +431,121 @@ async fn a_worker_killed_mid_job_is_retried() {
         .unwrap();
     assert!(done);
 }
+
+/// A one-page PDF whose text is `words`, with a correct xref table.
+fn tiny_pdf(words: &str) -> Vec<u8> {
+    let stream = format!("BT /F1 12 Tf 72 720 Td ({words}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R >> >> >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{stream}\nendstream",
+            stream.len()
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_string(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![];
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").bytes());
+    }
+    out.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .bytes(),
+    );
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pdf_text_is_extracted_in_a_child_process() {
+    let srv = server::testing::spawn(|c| c.job_workers = 0).await;
+    let alice = register(&srv, "alice").await;
+    let ws = workspace(&srv, &alice, &[]).await;
+    let c = channel(&srv, &alice, ws.id, "c", false).await;
+    let file = upload_ok(
+        &srv,
+        &alice,
+        c.id,
+        "memo.pdf",
+        &tiny_pdf("quarterly zeppelin"),
+    )
+    .await;
+    assert_eq!(send_with(&srv, &alice, c.id, &[file.id]).await.0, 200);
+    run_jobs(&srv).await;
+    let (state, text) = text_state(&srv, file.id).await;
+    assert_eq!(state, "done");
+    assert!(text.unwrap().contains("zeppelin"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_extraction_is_killed_and_not_retried() {
+    let dir = std::env::temp_dir().join(format!("commons-extract-{}", Uuid::now_v7().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pidfile = dir.join("pid");
+    let script = dir.join("hang.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let program = script.clone();
+    let srv = server::testing::spawn(move |c| {
+        c.job_workers = 0;
+        c.extract_program = Some(program);
+        c.extract_timeout = Duration::from_secs(1);
+    })
+    .await;
+    let alice = register(&srv, "alice").await;
+    let ws = workspace(&srv, &alice, &[]).await;
+    let c = channel(&srv, &alice, ws.id, "c", false).await;
+    let pdf = tiny_pdf("never read");
+    let file = upload_ok(&srv, &alice, c.id, "slow.pdf", &pdf).await;
+    assert_eq!(send_with(&srv, &alice, c.id, &[file.id]).await.0, 200);
+    run_jobs(&srv).await;
+
+    let pid = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .to_string();
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the extractor was killed and reaped");
+    assert_eq!(
+        text_state(&srv, file.id).await,
+        ("failed".to_string(), None)
+    );
+    let (done, attempts): (bool, i32) = sqlx::query_as(
+        "SELECT done_at IS NOT NULL, attempts FROM jobs WHERE kind = 'file_extract'",
+    )
+    .fetch_one(srv.pool())
+    .await
+    .unwrap();
+    assert!(done && attempts == 1, "no retry after a timeout");
+    assert_eq!(
+        fetch(&srv, &alice, &format!("/files/{}", file.id)).await,
+        (200, pdf)
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

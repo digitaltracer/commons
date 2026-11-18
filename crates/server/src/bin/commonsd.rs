@@ -4,8 +4,16 @@ use server::mail::{Mailer, MemoryMailer, SmtpMailer};
 use server::{AppState, Config};
 use tracing_subscriber::EnvFilter;
 
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    if std::env::args().nth(1).as_deref() == Some(server::files::EXTRACT_SUBCOMMAND) {
+        return Ok(server::files::extract_pdf_child());
+    }
+    serve()?;
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();

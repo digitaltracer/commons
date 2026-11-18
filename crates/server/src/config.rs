@@ -19,8 +19,12 @@ pub struct Config {
     pub log_retention: Duration,
     pub idempotency_retention: Duration,
     pub job_workers: usize,
+    /// Must outlast `extract_timeout`, so a running extraction is never claimed twice.
     pub job_lease: Duration,
     pub job_poll: Duration,
+    /// The PDF extractor program, run as `<program> __extract-pdf`; this binary by default.
+    pub extract_program: Option<std::path::PathBuf>,
+    pub extract_timeout: Duration,
     /// Local file store root, used when `s3_bucket` is unset.
     pub files_dir: String,
     /// S3-compatible bucket; credentials, region and endpoint come from the `AWS_*` variables.
@@ -55,8 +59,10 @@ impl Default for Config {
             log_retention: Duration::from_secs(30 * 24 * 3600),
             idempotency_retention: Duration::from_secs(14 * 24 * 3600),
             job_workers: 4,
-            job_lease: Duration::from_secs(60),
+            job_lease: Duration::from_secs(90),
             job_poll: Duration::from_millis(500),
+            extract_program: None,
+            extract_timeout: crate::files::EXTRACT_TIMEOUT,
             files_dir: "./data/files".into(),
             s3_bucket: None,
             max_file_bytes: 2 << 30,

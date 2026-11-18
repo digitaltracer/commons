@@ -103,6 +103,10 @@ pub fn test_config(database_url: String) -> Config {
         auth_attempts_per_minute: 10_000,
         repair_interval: std::time::Duration::from_millis(500),
         job_poll: std::time::Duration::from_millis(50),
+        // Test binaries live in target/<profile>/deps; commonsd is one level up.
+        extract_program: std::env::current_exe()
+            .ok()
+            .and_then(|p| Some(p.parent()?.parent()?.join("commonsd"))),
         files_dir: std::env::temp_dir()
             .join(format!("commons-files-{}", Uuid::now_v7().simple()))
             .to_string_lossy()

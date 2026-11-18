@@ -38,7 +38,11 @@ pub const MAX_EXTRACTED_BYTES: usize = 256 * 1024;
 const THUMBNAIL_PX: u32 = 320;
 const MAX_THUMBNAIL_SOURCE: i64 = 40 << 20;
 const MAX_EXTRACT_SOURCE: i64 = 50 << 20;
-const EXTRACT_TIMEOUT: Duration = Duration::from_secs(60);
+/// The default limit on one PDF extraction; the job lease must outlast it.
+pub const EXTRACT_TIMEOUT: Duration = Duration::from_secs(60);
+/// `commonsd __extract-pdf`: reads a PDF on stdin and writes its text to stdout.
+pub const EXTRACT_SUBCOMMAND: &str = "__extract-pdf";
+const TIMED_OUT: &str = "extraction timed out";
 /// Multipart parts in flight per upload; with 5 MB parts this bounds upload memory.
 const UPLOAD_CONCURRENCY: usize = 4;
 
@@ -659,17 +663,86 @@ pub fn clean_text(text: &str) -> String {
     out
 }
 
-fn extract_text(kind: TextKind, bytes: &[u8]) -> anyhow::Result<Option<String>> {
-    match kind {
-        TextKind::Text => {
-            if bytes.iter().take(8192).any(|b| *b == 0) {
-                return Ok(None);
-            }
-            Ok(Some(clean_text(&String::from_utf8_lossy(bytes))))
+fn extract_plain(bytes: &[u8]) -> Option<String> {
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        return None;
+    }
+    Some(clean_text(&String::from_utf8_lossy(bytes)))
+}
+
+/// The child side of PDF extraction, run by `commonsd __extract-pdf`.
+pub fn extract_pdf_child() -> std::process::ExitCode {
+    use std::io::{Read, Write};
+    let mut bytes = vec![];
+    if std::io::stdin()
+        .take(MAX_EXTRACT_SOURCE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return std::process::ExitCode::FAILURE;
+    }
+    match pdf_extract::extract_text_from_mem(&bytes) {
+        Ok(text)
+            if std::io::stdout()
+                .write_all(clean_text(&text).as_bytes())
+                .is_ok() =>
+        {
+            std::process::ExitCode::SUCCESS
         }
-        TextKind::Pdf => {
-            let text = pdf_extract::extract_text_from_mem(bytes)?;
-            Ok(Some(clean_text(&text)))
+        Ok(_) => std::process::ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+enum Extracted {
+    Text(String),
+    TimedOut,
+}
+
+/// Runs PDF extraction in a child process, killed and reaped if it outlives `timeout`.
+async fn extract_pdf(state: &AppState, bytes: bytes::Bytes) -> anyhow::Result<Extracted> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let program = match &state.config.extract_program {
+        Some(p) => p.clone(),
+        None => std::env::current_exe()?,
+    };
+    let mut child = tokio::process::Command::new(program)
+        .arg(EXTRACT_SUBCOMMAND)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("no stdin"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("no stdout"))?;
+    let run = async {
+        let write = async move {
+            // A child that exits early closes the pipe; its exit status says why.
+            let _ = stdin.write_all(&bytes).await;
+        };
+        let mut out = vec![];
+        let mut capped = (&mut stdout).take(MAX_EXTRACTED_BYTES as u64 + 1);
+        let read = capped.read_to_end(&mut out);
+        let ((), read) = tokio::join!(write, read);
+        read?;
+        let status = child.wait().await?;
+        anyhow::ensure!(status.success(), "extractor exited with {status}");
+        Ok::<_, anyhow::Error>(out)
+    };
+    match tokio::time::timeout(state.config.extract_timeout, run).await {
+        Ok(out) => Ok(Extracted::Text(clean_text(&String::from_utf8_lossy(&out?)))),
+        Err(_) => {
+            child.kill().await?;
+            Ok(Extracted::TimedOut)
         }
     }
 }
@@ -684,8 +757,9 @@ async fn set_text_state(state: &AppState, id: Uuid, s: &str) -> anyhow::Result<(
 }
 
 /// The extraction job. It is bounded in input size, output size and time, and it is
-/// idempotent, so a lease that expires under a killed worker simply runs it again. A failure
-/// never touches the file itself, so the download is unaffected.
+/// idempotent, so a lease that expires under a killed worker simply runs it again. PDFs are
+/// parsed in a child process; one that times out is killed and its text marked failed. A
+/// failure never touches the file itself, so the download is unaffected.
 pub async fn extract(state: &AppState, job: &Job) -> anyhow::Result<()> {
     let id = file_id(&job.payload)?;
     let row: Option<(String, String, i64, String)> =
@@ -704,11 +778,13 @@ pub async fn extract(state: &AppState, job: &Job) -> anyhow::Result<()> {
     };
     let result: anyhow::Result<Option<String>> = async {
         let bytes = state.files.get(&object_key(id)).await?.bytes().await?;
-        let work = tokio::task::spawn_blocking(move || extract_text(kind, &bytes));
-        tokio::time::timeout(EXTRACT_TIMEOUT, work)
-            .await
-            .map_err(|_| anyhow::anyhow!("extraction timed out"))?
-            .map_err(|e| anyhow::anyhow!("extraction crashed: {e}"))?
+        match kind {
+            TextKind::Text => Ok(extract_plain(&bytes)),
+            TextKind::Pdf => match extract_pdf(state, bytes).await? {
+                Extracted::Text(t) => Ok(Some(t)),
+                Extracted::TimedOut => Err(anyhow::anyhow!(TIMED_OUT)),
+            },
+        }
     }
     .await;
     match result {
@@ -724,6 +800,11 @@ pub async fn extract(state: &AppState, job: &Job) -> anyhow::Result<()> {
             Ok(())
         }
         Ok(None) => set_text_state(state, id, "none").await,
+        // A file that ran out the clock would only do so again: no retry.
+        Err(e) if e.to_string() == TIMED_OUT => {
+            tracing::warn!(file = %id, "text extraction timed out");
+            set_text_state(state, id, "failed").await
+        }
         Err(e) => {
             if job.attempts >= job.max_attempts {
                 set_text_state(state, id, "failed").await?;

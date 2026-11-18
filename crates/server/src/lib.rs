@@ -67,6 +67,10 @@ impl AppState {
         pool: sqlx::PgPool,
         mailer: Arc<dyn mail::Mailer>,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.job_lease > config.extract_timeout,
+            "the job lease must be longer than the extraction timeout"
+        );
         let limiter = auth::Limiter::new(config.auth_attempts_per_minute);
         let hub = hub::Hub::new(config.connection_queue);
         let files = files::open_store(&config)?;
