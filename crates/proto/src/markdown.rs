@@ -1,7 +1,7 @@
 //! Restricted Markdown (decision 15), rendered to a node tree with no raw-HTML variant.
 //! Clients turn these nodes into text nodes and a fixed set of elements; HTML in the source
 //! comes out as literal text.
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,10 +27,20 @@ pub enum Node {
         children: Vec<Node>,
     },
     Paragraph(Vec<Node>),
-    CodeBlock(String),
+    /// `lang` is the first word of the fence's info string, when it looks like a language.
+    CodeBlock {
+        lang: Option<String>,
+        text: String,
+    },
     Quote(Vec<Node>),
-    List(Vec<Vec<Node>>),
+    /// `start` is the first number of a numbered list; `None` for bullets.
+    List {
+        start: Option<u64>,
+        items: Vec<Vec<Node>>,
+    },
     LineBreak,
+    /// Empty lines typed between two top-level blocks, at most [`MAX_GAP`].
+    Gap(u8),
     /// A mention or channel link from the message's entities; `text` is the source text.
     Mention {
         target: Target,
@@ -40,6 +50,9 @@ pub enum Node {
 
 const OPEN: char = '\u{E000}';
 const CLOSE: char = '\u{E001}';
+
+/// Most empty lines kept between two blocks; longer runs shrink to this.
+pub const MAX_GAP: u8 = 3;
 
 /// Renders `source` with its mention and channel-link entities as atomic [`Node::Mention`]
 /// spans, so Markdown inside a name is never interpreted. Entities that are out of range,
@@ -101,7 +114,10 @@ fn restore(nodes: Vec<Node>, spans: &[(String, Target)]) -> Vec<Node> {
         match n {
             Node::Text(t) => split_text(&t, spans, &mut out),
             Node::Code(t) => out.push(Node::Code(unplace(&t, spans))),
-            Node::CodeBlock(t) => out.push(Node::CodeBlock(unplace(&t, spans))),
+            Node::CodeBlock { lang, text } => out.push(Node::CodeBlock {
+                lang,
+                text: unplace(&text, spans),
+            }),
             Node::Strong(c) => out.push(Node::Strong(restore(c, spans))),
             Node::Emphasis(c) => out.push(Node::Emphasis(restore(c, spans))),
             Node::Strike(c) => out.push(Node::Strike(restore(c, spans))),
@@ -111,9 +127,10 @@ fn restore(nodes: Vec<Node>, spans: &[(String, Target)]) -> Vec<Node> {
                 href,
                 children: restore(children, spans),
             }),
-            Node::List(items) => out.push(Node::List(
-                items.into_iter().map(|i| restore(i, spans)).collect(),
-            )),
+            Node::List { start, items } => out.push(Node::List {
+                start,
+                items: items.into_iter().map(|i| restore(i, spans)).collect(),
+            }),
             other => out.push(other),
         }
     }
@@ -173,15 +190,40 @@ pub fn render(source: &str) -> Vec<Node> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     let mut stack: Vec<(Option<Frame>, Vec<Node>)> = vec![(None, Vec::new())];
-    let mut list_items: Vec<Vec<Vec<Node>>> = Vec::new();
-    let mut code_block: Option<String> = None;
+    let mut lists: Vec<(Option<u64>, Vec<Vec<Node>>)> = Vec::new();
+    let mut code_block: Option<(Option<String>, String)> = None;
+    // Tag nesting depth, and where the last top-level block ended, for the gaps between blocks.
+    let mut depth = 0usize;
+    let mut last_block_end: Option<usize> = None;
 
-    for event in Parser::new_ext(source, opts) {
-        if let Some(buf) = code_block.as_mut() {
+    for (event, range) in Parser::new_ext(source, opts).into_offset_iter() {
+        let top_level_start = depth == 0 && matches!(event, Event::Start(_) | Event::Rule);
+        if top_level_start {
+            if let Some(end) = last_block_end {
+                let lines = blank_lines_between(source, end, range.start);
+                if lines > 0 {
+                    push(&mut stack, Node::Gap(lines.min(MAX_GAP as usize) as u8));
+                }
+            }
+            if matches!(event, Event::Rule) {
+                last_block_end = Some(range.end);
+            }
+        }
+        match &event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    last_block_end = Some(range.end);
+                }
+            }
+            _ => {}
+        }
+        if let Some((_, buf)) = code_block.as_mut() {
             match event {
                 Event::End(TagEnd::CodeBlock) => {
-                    let text = code_block.take().unwrap_or_default();
-                    push(&mut stack, Node::CodeBlock(text));
+                    let (lang, text) = code_block.take().unwrap_or_default();
+                    push(&mut stack, Node::CodeBlock { lang, text });
                 }
                 Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => buf.push_str(&t),
                 _ => {}
@@ -189,38 +231,57 @@ pub fn render(source: &str) -> Vec<Node> {
             continue;
         }
         match event {
-            Event::Start(Tag::CodeBlock(_)) => code_block = Some(String::new()),
-            Event::Start(Tag::List(_)) => list_items.push(Vec::new()),
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) => code_lang(&info),
+                    CodeBlockKind::Indented => None,
+                };
+                code_block = Some((lang, String::new()));
+            }
+            Event::Start(Tag::List(start)) => lists.push((start, Vec::new())),
             Event::End(TagEnd::List(_)) => {
-                let items = list_items.pop().unwrap_or_default();
-                push(&mut stack, Node::List(items));
+                let (start, items) = lists.pop().unwrap_or_default();
+                push(&mut stack, Node::List { start, items });
             }
             Event::Start(tag) => {
                 let frame = match tag {
                     Tag::Paragraph => Frame::Paragraph,
+                    Tag::Heading { .. } => Frame::Heading,
+                    Tag::HtmlBlock => Frame::HtmlBlock,
                     Tag::Strong => Frame::Strong,
                     Tag::Emphasis => Frame::Emphasis,
                     Tag::Strikethrough => Frame::Strike,
                     Tag::BlockQuote(_) => Frame::Quote,
                     Tag::Item => Frame::Item,
                     Tag::Link { dest_url, .. } => Frame::Link(dest_url.to_string()),
-                    // Headings, tables, images and HTML blocks flatten into their text.
+                    // Images flatten into their alt text.
                     _ => Frame::Transparent,
                 };
                 stack.push((Some(frame), Vec::new()));
             }
             Event::End(_) => {
-                let Some((Some(frame), children)) = stack.pop() else {
+                let Some((Some(frame), mut children)) = stack.pop() else {
                     continue;
                 };
                 match frame {
                     Frame::Paragraph => push(&mut stack, Node::Paragraph(children)),
+                    // A heading is a bold line of its own, never merged into its neighbours.
+                    Frame::Heading => {
+                        push(&mut stack, Node::Paragraph(vec![Node::Strong(children)]))
+                    }
+                    // Raw HTML stays literal text, one line per source line.
+                    Frame::HtmlBlock => {
+                        if let Some(Node::Text(t)) = children.last_mut() {
+                            t.truncate(t.trim_end_matches(['\n', '\r']).len());
+                        }
+                        push(&mut stack, Node::Paragraph(children))
+                    }
                     Frame::Strong => push(&mut stack, Node::Strong(children)),
                     Frame::Emphasis => push(&mut stack, Node::Emphasis(children)),
                     Frame::Strike => push(&mut stack, Node::Strike(children)),
                     Frame::Quote => push(&mut stack, Node::Quote(children)),
-                    Frame::Item => match list_items.last_mut() {
-                        Some(items) => items.push(children),
+                    Frame::Item => match lists.last_mut() {
+                        Some((_, items)) => items.push(children),
                         None => extend(&mut stack, children),
                     },
                     Frame::Link(href) if safe_href(&href) => {
@@ -241,11 +302,13 @@ pub fn render(source: &str) -> Vec<Node> {
         let (_, children) = stack.pop().unwrap_or_default();
         extend(&mut stack, children);
     }
-    stack.pop().map(|(_, n)| n).unwrap_or_default()
+    linkify(stack.pop().map(|(_, n)| n).unwrap_or_default())
 }
 
 enum Frame {
     Paragraph,
+    Heading,
+    HtmlBlock,
     Strong,
     Emphasis,
     Strike,
@@ -253,6 +316,128 @@ enum Frame {
     Item,
     Link(String),
     Transparent,
+}
+
+/// Empty lines strictly between the block ending at `end` and the one starting at `start`.
+fn blank_lines_between(source: &str, end: usize, start: usize) -> usize {
+    let (Some(before), Some(between)) = (source.get(..end), source.get(end..start)) else {
+        return 0;
+    };
+    // The previous block's range may or may not include its own line ending.
+    let trailing = before.len() - before.trim_end_matches(['\n', '\r']).len();
+    let newlines =
+        before[before.len() - trailing..].matches('\n').count() + between.matches('\n').count();
+    newlines.saturating_sub(1)
+}
+
+/// The fence's language, when its first word looks like one (`rust`, `c++`, `objective-c`).
+fn code_lang(info: &str) -> Option<String> {
+    let word = info.split_whitespace().next()?;
+    let ok = word.len() <= 24
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+#._-".contains(c));
+    ok.then(|| word.to_ascii_lowercase())
+}
+
+/// Turns bare `http(s)://` URLs in text into links. Code and existing links are left alone.
+fn linkify(nodes: Vec<Node>) -> Vec<Node> {
+    let mut out: Vec<Node> = Vec::with_capacity(nodes.len());
+    let mut text = String::new();
+    let flush = |text: &mut String, out: &mut Vec<Node>| {
+        if !text.is_empty() {
+            split_urls(&std::mem::take(text), out);
+        }
+    };
+    for n in nodes {
+        let n = match n {
+            Node::Text(t) => {
+                text.push_str(&t);
+                continue;
+            }
+            Node::Strong(c) => Node::Strong(linkify(c)),
+            Node::Emphasis(c) => Node::Emphasis(linkify(c)),
+            Node::Strike(c) => Node::Strike(linkify(c)),
+            Node::Paragraph(c) => Node::Paragraph(linkify(c)),
+            Node::Quote(c) => Node::Quote(linkify(c)),
+            Node::List { start, items } => Node::List {
+                start,
+                items: items.into_iter().map(linkify).collect(),
+            },
+            other => other,
+        };
+        flush(&mut text, &mut out);
+        out.push(n);
+    }
+    flush(&mut text, &mut out);
+    out
+}
+
+fn split_urls(t: &str, out: &mut Vec<Node>) {
+    let lower = t.to_ascii_lowercase();
+    let mut last = 0;
+    let mut from = 0;
+    while let Some(s) = ["https://", "http://"]
+        .iter()
+        .filter_map(|p| lower[from..].find(p).map(|i| i + from))
+        .min()
+    {
+        from = s + 1;
+        if t[..s]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+        {
+            continue;
+        }
+        let stop = t[s..]
+            .find(|c: char| {
+                c.is_whitespace()
+                    || c.is_control()
+                    || "<>\"`".contains(c)
+                    || c == OPEN
+                    || c == CLOSE
+            })
+            .map_or(t.len(), |i| i + s);
+        let e = s + url_len(&t[s..stop]);
+        if t[s..e]
+            .split_once("://")
+            .is_none_or(|(_, rest)| rest.is_empty())
+        {
+            continue;
+        }
+        if s > last {
+            out.push(Node::Text(t[last..s].to_string()));
+        }
+        out.push(Node::Link {
+            href: t[s..e].to_string(),
+            children: vec![Node::Text(t[s..e].to_string())],
+        });
+        last = e;
+        from = e;
+    }
+    if last < t.len() {
+        out.push(Node::Text(t[last..].to_string()));
+    }
+}
+
+/// Length of `candidate` without trailing punctuation, keeping a `)` or `]` that closes one
+/// opened inside the URL.
+fn url_len(candidate: &str) -> usize {
+    let mut u = candidate;
+    loop {
+        let Some(c) = u.chars().next_back() else {
+            return 0;
+        };
+        let unbalanced = |open: char, close: char| {
+            c == close && u.matches(open).count() < u.matches(close).count()
+        };
+        if ".,;:!?'*_".contains(c) || unbalanced('(', ')') || unbalanced('[', ']') {
+            u = &u[..u.len() - c.len_utf8()];
+        } else {
+            return u.len();
+        }
+    }
 }
 
 fn push(stack: &mut [(Option<Frame>, Vec<Node>)], node: Node) {
@@ -277,9 +462,10 @@ pub fn plain_text(source: &str) -> String {
     fn walk(nodes: &[Node], out: &mut String) {
         for n in nodes {
             match n {
-                Node::Text(t) | Node::Code(t) | Node::CodeBlock(t) => out.push_str(t),
+                Node::Text(t) | Node::Code(t) | Node::CodeBlock { text: t, .. } => out.push_str(t),
                 Node::Mention { text, .. } => out.push_str(text),
                 Node::LineBreak => out.push(' '),
+                Node::Gap(_) => {}
                 Node::Strong(c)
                 | Node::Emphasis(c)
                 | Node::Strike(c)
@@ -291,7 +477,7 @@ pub fn plain_text(source: &str) -> String {
                         out.push(' ');
                     }
                 }
-                Node::List(items) => {
+                Node::List { items, .. } => {
                     for i in items {
                         walk(i, out);
                         out.push(' ');
@@ -314,7 +500,9 @@ mod tests {
         fn go(nodes: &[Node], out: &mut Vec<String>) {
             for n in nodes {
                 match n {
-                    Node::Text(t) | Node::Code(t) | Node::CodeBlock(t) => out.push(t.clone()),
+                    Node::Text(t) | Node::Code(t) | Node::CodeBlock { text: t, .. } => {
+                        out.push(t.clone())
+                    }
                     Node::Mention { text, .. } => out.push(format!("[{text}]")),
                     Node::Strong(c)
                     | Node::Emphasis(c)
@@ -322,8 +510,8 @@ mod tests {
                     | Node::Quote(c)
                     | Node::Paragraph(c)
                     | Node::Link { children: c, .. } => go(c, out),
-                    Node::List(items) => items.iter().for_each(|i| go(i, out)),
-                    Node::LineBreak => {}
+                    Node::List { items, .. } => items.iter().for_each(|i| go(i, out)),
+                    Node::LineBreak | Node::Gap(_) => {}
                 }
             }
         }
@@ -414,6 +602,137 @@ mod tests {
             "[a] \u{FFFD}0\u{FFFD} b",
             "stray markers are neutralised"
         );
+    }
+
+    fn p(text: &str) -> Node {
+        Node::Paragraph(vec![Node::Text(text.into())])
+    }
+
+    #[test]
+    fn code_blocks_keep_lines_and_language() {
+        let nodes = render("Repro:\n```Rust title\nfn main() {\n    let x = 1;\n}\n```\nafter");
+        assert_eq!(
+            nodes[1],
+            Node::CodeBlock {
+                lang: Some("rust".into()),
+                text: "fn main() {\n    let x = 1;\n}\n".into()
+            }
+        );
+        let odd = render("```<b>\nx\n```");
+        assert!(
+            matches!(&odd[0], Node::CodeBlock { lang: None, .. }),
+            "{odd:?}"
+        );
+    }
+
+    #[test]
+    fn headings_are_bold_lines_of_their_own() {
+        let nodes = render("# One\n# Two\nAfter");
+        assert_eq!(
+            nodes,
+            vec![
+                Node::Paragraph(vec![Node::Strong(vec![Node::Text("One".into())])]),
+                Node::Paragraph(vec![Node::Strong(vec![Node::Text("Two".into())])]),
+                p("After"),
+            ]
+        );
+    }
+
+    #[test]
+    fn html_blocks_keep_their_lines_as_text() {
+        let nodes = render("<config>\n  <a>1</a>\n</config>");
+        assert_eq!(nodes, vec![p("<config>\n  <a>1</a>\n</config>")]);
+    }
+
+    #[test]
+    fn numbered_lists_keep_their_start() {
+        let nodes = render("Steps:\n1. pull\n2. run");
+        assert!(
+            matches!(&nodes[1], Node::List { start: Some(1), items } if items.len() == 2),
+            "{nodes:?}"
+        );
+        let later = render("3. pull\n4. run");
+        assert!(
+            matches!(&later[0], Node::List { start: Some(3), .. }),
+            "{later:?}"
+        );
+        let bullets = render("- a\n- b");
+        assert!(matches!(&bullets[0], Node::List { start: None, .. }));
+    }
+
+    #[test]
+    fn blank_lines_between_blocks_are_kept() {
+        assert_eq!(
+            render("a\nb")[0],
+            Node::Paragraph(vec![
+                Node::Text("a".into()),
+                Node::LineBreak,
+                Node::Text("b".into())
+            ])
+        );
+        assert_eq!(render("a\n\nb"), vec![p("a"), Node::Gap(1), p("b")]);
+        assert_eq!(render("a\n\n\n\nb"), vec![p("a"), Node::Gap(3), p("b")]);
+        assert_eq!(render("a\n\n\n\n\n\n\nb")[1], Node::Gap(MAX_GAP));
+        assert_eq!(render("a\r\n\r\nb"), vec![p("a"), Node::Gap(1), p("b")]);
+        // A list right under a line, or a code block, gets no gap.
+        assert!(
+            !render("Steps:\n- a\n```\nx\n```")
+                .iter()
+                .any(|n| matches!(n, Node::Gap(_)))
+        );
+        // Blank lines inside a quote or list are not top-level gaps.
+        assert!(
+            !render("> a\n>\n> b")
+                .iter()
+                .any(|n| matches!(n, Node::Gap(_)))
+        );
+    }
+
+    fn links(nodes: &[Node]) -> Vec<String> {
+        let mut out = vec![];
+        fn go(nodes: &[Node], out: &mut Vec<String>) {
+            for n in nodes {
+                match n {
+                    Node::Link { href, .. } => out.push(href.clone()),
+                    Node::Strong(c) | Node::Emphasis(c) | Node::Paragraph(c) | Node::Quote(c) => {
+                        go(c, out)
+                    }
+                    Node::List { items, .. } => items.iter().for_each(|i| go(i, out)),
+                    _ => {}
+                }
+            }
+        }
+        go(nodes, &mut out);
+        out
+    }
+
+    #[test]
+    fn bare_urls_become_links() {
+        let nodes = render(
+            "See https://example.org/a_b_c. (and http://x.dev/p(1)) or **https://b.io/x**, \
+             not xhttps://no, `https://code.dev` or [named](https://n.dev) or https://",
+        );
+        assert_eq!(
+            links(&nodes),
+            vec![
+                "https://example.org/a_b_c",
+                "http://x.dev/p(1)",
+                "https://b.io/x",
+                "https://n.dev"
+            ]
+        );
+        assert_eq!(
+            plain_text("go to https://example.org."),
+            "go to https://example.org."
+        );
+    }
+
+    #[test]
+    fn bare_urls_stop_at_mentions() {
+        let src = "https://example.org/@Ann";
+        let nodes = render_with_entities(src, &[mention(1, 20, 24)]);
+        assert_eq!(links(&nodes), vec!["https://example.org/"]);
+        assert_eq!(texts(&nodes).join(""), "https://example.org/[@Ann]");
     }
 
     #[test]

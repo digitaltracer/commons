@@ -259,6 +259,16 @@ pub fn host(url: &str) -> String {
     rest.split('/').next().unwrap_or(rest).to_string()
 }
 
+/// Copies text to the clipboard. Returns false when the webview refused.
+pub async fn copy_text(text: &str) -> bool {
+    let Some(w) = web_sys::window() else {
+        return false;
+    };
+    wasm_bindgen_futures::JsFuture::from(w.navigator().clipboard().write_text(text))
+        .await
+        .is_ok()
+}
+
 /// Byte offset of a UTF-16 index, as text fields report caret positions.
 pub fn utf16_to_byte(s: &str, n: u32) -> usize {
     let mut units = 0u32;

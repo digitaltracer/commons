@@ -413,10 +413,7 @@ fn Message(
     let author = m.author_name.clone();
     let body = (!m.deleted).then(|| {
         view! {
-            <div class="body">
-                {markdown::body(&m.body, &m.entities, reader)}
-                {m.edited.then(|| view! { <span class="edited">" (edited)"</span> })}
-            </div>
+            <div class="body">{markdown::body(&m.body, &m.entities, reader, m.edited)}</div>
         }
     });
     let aria = if pending {

@@ -13,8 +13,19 @@ pub struct Reader {
     pub me: Uuid,
 }
 
-pub fn body(source: &str, entities: &[Entity], reader: Reader) -> AnyView {
-    nodes(render_with_entities(source, entities), reader)
+/// A message body. `edited` puts "(edited)" after the last word, inside the last paragraph.
+pub fn body(source: &str, entities: &[Entity], reader: Reader, edited: bool) -> AnyView {
+    let mut list = render_with_entities(source, entities);
+    let last = (edited && matches!(list.last(), Some(Node::Paragraph(_))))
+        .then(|| list.pop())
+        .flatten();
+    let mark = || view! { <span class="edited">" (edited)"</span> };
+    match last {
+        Some(Node::Paragraph(c)) => {
+            view! { {nodes(list, reader)}<p>{nodes(c, reader)}{mark()}</p> }.into_any()
+        }
+        _ => view! { {nodes(list, reader)}{edited.then(mark)} }.into_any(),
+    }
 }
 
 fn nodes(list: Vec<Node>, r: Reader) -> AnyView {
@@ -36,15 +47,55 @@ fn node(n: Node, r: Reader) -> AnyView {
                 .into_any()
         }
         Node::Paragraph(c) => view! { <p>{nodes(c, r)}</p> }.into_any(),
-        Node::CodeBlock(t) => view! { <pre class="pre"><code>{t}</code></pre> }.into_any(),
+        Node::CodeBlock { lang, text } => code_block(lang, text),
         Node::Quote(c) => view! { <blockquote>{nodes(c, r)}</blockquote> }.into_any(),
-        Node::List(items) => view! {
-            <ul>{items.into_iter().map(|i| view! { <li>{nodes(i, r)}</li> }).collect_view()}</ul>
+        Node::List { start, items } => {
+            let items = items
+                .into_iter()
+                .map(|i| view! { <li>{nodes(i, r)}</li> })
+                .collect_view();
+            match start {
+                Some(n) => view! { <ol start=n.to_string()>{items}</ol> }.into_any(),
+                None => view! { <ul>{items}</ul> }.into_any(),
+            }
         }
-        .into_any(),
         Node::LineBreak => view! { <br /> }.into_any(),
+        Node::Gap(n) => {
+            // One body line per empty line typed (`.body` line-height is 1.45).
+            let style = format!("height: calc({n} * 1.45em)");
+            view! { <div class="gap" style=style aria-hidden="true"></div> }.into_any()
+        }
         Node::Mention { target, text } => mention(target, text, r),
     }
+}
+
+/// A code block with its language and a Copy button for the raw text.
+fn code_block(lang: Option<String>, text: String) -> AnyView {
+    let copied = RwSignal::new(false);
+    let raw = StoredValue::new(text.clone());
+    let copy = move |_| {
+        leptos::task::spawn_local(async move {
+            if crate::ui::copy_text(&raw.get_value()).await {
+                copied.set(true);
+                set_timeout(
+                    move || copied.set(false),
+                    std::time::Duration::from_millis(1500),
+                );
+            }
+        });
+    };
+    view! {
+        <div class="cb">
+            <div class="cbh">
+                <span>{lang}</span>
+                <button type="button" class="cbcopy" on:click=copy>
+                    {move || if copied.get() { "Copied" } else { "Copy" }}
+                </button>
+            </div>
+            <pre class="pre"><code>{text}</code></pre>
+        </div>
+    }
+    .into_any()
 }
 
 fn mention(target: Target, text: String, r: Reader) -> AnyView {
