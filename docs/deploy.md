@@ -71,6 +71,8 @@ sudo certbot --nginx -d commons.adarshnb.com
 
 The site is a plain port-80 block. `certbot --nginx` adds the 443 listener, the certificate and the redirect to it, and certbot's timer renews the certificate. The site proxies `/v1/socket` as a WebSocket with 1-hour idle timeouts, and streams uploads to `commonsd` (`proxy_request_buffering off`).
 
+**Updating an existing install.** Site files installed before 2026-11-18's fix set the forwarding headers at the server level only. nginx drops those in any `location` that sets its own `proxy_set_header`, so `commonsd` never got the client's address, and a client could send its own `X-Real-IP` through. The installed file also carries certbot's edits, so either copy the five `proxy_set_header` lines (`Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`) into each `location` block by hand, or copy the new file over it and run `sudo certbot --nginx -d commons.adarshnb.com` again, which reinstalls the existing certificate. Then `sudo nginx -t && sudo systemctl reload nginx`.
+
 ## 5. Check it
 
 ```sh
