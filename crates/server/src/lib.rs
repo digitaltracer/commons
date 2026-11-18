@@ -41,6 +41,7 @@ pub struct Inner {
     pub feeds: feed::Feeds,
     pub mailer: Arc<dyn mail::Mailer>,
     pub limiter: auth::Limiter,
+    pub ip_limiter: auth::Limiter,
     pub files: Arc<dyn object_store::ObjectStore>,
 }
 
@@ -72,6 +73,7 @@ impl AppState {
             "the job lease must be longer than the extraction timeout"
         );
         let limiter = auth::Limiter::new(config.auth_attempts_per_minute);
+        let ip_limiter = auth::Limiter::new(config.auth_attempts_per_minute.saturating_mul(5));
         let hub = hub::Hub::new(config.connection_queue);
         let files = files::open_store(&config)?;
         Ok(AppState(Arc::new(Inner {
@@ -81,6 +83,7 @@ impl AppState {
             feeds: feed::Feeds::default(),
             mailer,
             limiter,
+            ip_limiter,
             files,
         })))
     }
@@ -110,6 +113,7 @@ pub fn router(state: AppState) -> Router {
 pub fn spawn_background(state: &AppState) -> tokio_util::sync::CancellationToken {
     let cancel = tokio_util::sync::CancellationToken::new();
     tokio::spawn(hub::listen(state.clone(), cancel.clone()));
+    tokio::spawn(auth::prune_limiters(state.clone(), cancel.clone()));
     // Zero workers leaves jobs queued for the caller to run (tests do this).
     if state.config.job_workers > 0 {
         tokio::spawn(jobs::run_workers(state.clone(), cancel.clone()));

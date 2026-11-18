@@ -45,7 +45,8 @@ Edit `deploy/.env`:
 - `COMMONS_PUBLIC_URL=https://commons.adarshnb.com`.
 - `COMMONS_REGISTRATION`: `open`, `closed` or `allowlist`. With `allowlist`, set `COMMONS_REGISTRATION_ALLOWLIST` to the comma-separated emails that may register. Refused registrations get a 403 with a message the desktop app shows.
 - `COMMONS_MAX_FILE_BYTES=104857600` (100 MiB) and `COMMONS_USER_QUOTA_BYTES=2147483648` (2 GiB) for a test box. If you change the file limit, change `client_max_body_size` in the nginx site to match.
-- `COMMONS_SMTP_URL` is left empty, so **password-reset email is off**: reset requests are accepted, but no email goes out. Set it, and `COMMONS_MAIL_FROM`, to turn reset on.
+- `COMMONS_SMTP_URL` is left empty, so **password-reset email is off**: reset requests are accepted and logged, but no email goes out and no link is kept. Set it, and `COMMONS_MAIL_FROM`, to turn reset on.
+- `COMMONS_TRUSTED_PROXIES`: login and reset are limited per email and per client IP. The client IP comes from nginx's `X-Real-IP` only when the connection is from loopback or a listed proxy. Under compose, nginx connects through the `edge` network's gateway, so list that address (`docker network inspect commons_edge`); otherwise every client shares one per-IP limit.
 
 `deploy/.env` is git-ignored and excluded from the Docker build context. Postgres reads its password only on first start, when the volume is empty. To change it later, run `ALTER ROLE commons PASSWORD '…'` and update the file.
 

@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use lettre::message::Mailbox;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -36,12 +34,25 @@ impl Mailer for SmtpMailer {
     }
 }
 
-/// Keeps mail in memory. Used when no SMTP server is configured, and by tests.
-#[derive(Default)]
-pub struct MemoryMailer {
-    pub sent: Mutex<Vec<(String, String, String)>>,
+/// Used when no SMTP server is configured: logs that mail was due, and keeps nothing.
+pub struct LogMailer;
+
+#[async_trait::async_trait]
+impl Mailer for LogMailer {
+    async fn send(&self, to: &str, subject: &str, _body: &str) -> anyhow::Result<()> {
+        tracing::warn!(to, subject, "mail not sent: no SMTP configured");
+        Ok(())
+    }
 }
 
+/// Keeps mail in memory, for tests.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct MemoryMailer {
+    pub sent: std::sync::Mutex<Vec<(String, String, String)>>,
+}
+
+#[cfg(feature = "testing")]
 #[async_trait::async_trait]
 impl Mailer for MemoryMailer {
     async fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()> {

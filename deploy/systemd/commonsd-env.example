@@ -24,8 +24,9 @@ COMMONS_MAX_FILE_BYTES=104857600
 # 2 GiB of uploads per user.
 COMMONS_USER_QUOTA_BYTES=2147483648
 
-# Outgoing mail, for password reset. Unset here: reset requests are accepted but no email is
-# sent, so password reset is off. Example: smtps://user:password@smtp.example.com:465
+# Outgoing mail, for password reset. Unset here: reset requests are accepted and logged, but
+# no email is sent and no link is kept, so password reset is off.
+# Example: smtps://user:password@smtp.example.com:465
 COMMONS_SMTP_URL=
 # Sender for that mail. Default: Commons <no-reply@localhost>
 COMMONS_MAIL_FROM=
@@ -33,6 +34,10 @@ COMMONS_MAIL_FROM=
 # S3-compatible file storage instead of COMMONS_FILES_DIR; credentials, region and endpoint
 # come from the AWS_* variables. Unset: files stay on local disk.
 COMMONS_S3_BUCKET=
+
+# Proxies whose X-Real-IP / X-Forwarded-For give the client address for login limits, besides
+# loopback. nginx connects over loopback here, so leave it empty.
+COMMONS_TRUSTED_PROXIES=
 
 # Log filter (tracing EnvFilter syntax). Logs go to the journal.
 RUST_LOG=info

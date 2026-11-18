@@ -140,9 +140,12 @@ pub async fn spawn_with(config: Config) -> TestServer {
     let app = crate::router(state.clone());
     let stop = cancel.clone();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { stop.cancelled().await })
-            .await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { stop.cancelled().await })
+        .await;
     });
     TestServer {
         base_url: format!("http://{addr}"),

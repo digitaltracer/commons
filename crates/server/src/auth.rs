@@ -32,7 +32,7 @@ pub fn routes() -> Router<AppState> {
         .route("/me", get(me))
 }
 
-/// Per-email attempt limiter for login and reset.
+/// Attempt limiter for login and reset, keyed by email or by client IP.
 pub struct Limiter(DefaultKeyedRateLimiter<String>);
 
 impl Limiter {
@@ -44,6 +44,80 @@ impl Limiter {
         self.0
             .check_key(&key.to_string())
             .map_err(|_| ApiError::RateLimited)
+    }
+    /// Drops keys whose limit has fully replenished, so unique keys can't grow memory.
+    pub fn prune(&self) {
+        self.0.retain_recent();
+        self.0.shrink_to_fit();
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+pub async fn prune_limiters(state: AppState, cancel: tokio_util::sync::CancellationToken) {
+    let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = every.tick() => {
+                state.limiter.prune();
+                state.ip_limiter.prune();
+            }
+        }
+    }
+}
+
+/// The caller's address: the peer, or the address a trusted proxy (loopback or listed)
+/// forwarded in `X-Real-IP`, else the last `X-Forwarded-For` entry.
+pub fn client_ip(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    trusted: &[std::net::IpAddr],
+) -> std::net::IpAddr {
+    if !(peer.is_loopback() || trusted.contains(&peer)) {
+        return peer;
+    }
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    header("x-real-ip")
+        .and_then(|v| v.trim().parse().ok())
+        .or_else(|| {
+            header("x-forwarded-for")
+                .and_then(|v| v.rsplit(',').next())
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(peer)
+}
+
+/// The caller's IP, when the server runs with connect info.
+pub struct ClientIp(pub Option<std::net::IpAddr>);
+
+impl FromRequestParts<AppState> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip());
+        Ok(ClientIp(peer.map(|p| {
+            client_ip(p, &parts.headers, &state.config.trusted_proxies)
+        })))
+    }
+}
+
+impl ClientIp {
+    fn check(&self, state: &AppState, action: &str) -> ApiResult<()> {
+        match self.0 {
+            Some(ip) => state.ip_limiter.check(&format!("{action}:{ip}")),
+            None => Ok(()),
+        }
     }
 }
 
@@ -210,8 +284,10 @@ pub async fn register(
     responses((status = 200, body = SessionResponse), (status = 401), (status = 429)))]
 pub async fn login(
     State(state): State<AppState>,
+    ip: ClientIp,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
+    ip.check(&state, "login")?;
     let email = normalise_email(&req.email)?;
     state.limiter.check(&format!("login:{email}"))?;
     let row: Option<(Uuid, String, String)> =
@@ -281,8 +357,10 @@ pub async fn me(State(state): State<AppState>, auth: AuthUser) -> ApiResult<Json
 #[utoipa::path(post, path = "/v1/auth/reset", request_body = ResetRequest, responses((status = 202)))]
 pub async fn reset_request(
     State(state): State<AppState>,
+    ip: ClientIp,
     Json(req): Json<ResetRequest>,
 ) -> ApiResult<StatusCode> {
+    ip.check(&state, "reset")?;
     let email = normalise_email(&req.email)?;
     state.limiter.check(&format!("reset:{email}"))?;
     let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
@@ -316,8 +394,10 @@ pub async fn reset_request(
     responses((status = 204), (status = 400)))]
 pub async fn reset_confirm(
     State(state): State<AppState>,
+    ip: ClientIp,
     Json(req): Json<ResetConfirm>,
 ) -> ApiResult<StatusCode> {
+    ip.check(&state, "reset-confirm")?;
     check_password(&req.password)?;
     state
         .limiter

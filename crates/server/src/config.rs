@@ -15,7 +15,10 @@ pub struct Config {
     pub send_timeout: Duration,
     /// Sockets re-read their streams on this period, repairing missed wakeups.
     pub repair_interval: Duration,
+    /// Login and reset attempts per email per minute; five times this per client IP.
     pub auth_attempts_per_minute: u32,
+    /// Proxies, besides loopback, whose `X-Real-IP` / `X-Forwarded-For` are believed.
+    pub trusted_proxies: Vec<std::net::IpAddr>,
     pub log_retention: Duration,
     pub idempotency_retention: Duration,
     pub job_workers: usize,
@@ -56,6 +59,7 @@ impl Default for Config {
             send_timeout: Duration::from_secs(10),
             repair_interval: Duration::from_secs(15),
             auth_attempts_per_minute: 10,
+            trusted_proxies: vec![],
             log_retention: Duration::from_secs(30 * 24 * 3600),
             idempotency_retention: Duration::from_secs(14 * 24 * 3600),
             job_workers: 4,
@@ -93,6 +97,14 @@ impl Config {
             c.files_dir = v;
         }
         c.s3_bucket = var("COMMONS_S3_BUCKET");
+        if let Some(v) = var("COMMONS_TRUSTED_PROXIES") {
+            c.trusted_proxies = v
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| p.parse())
+                .collect::<Result<_, _>>()?;
+        }
         if let Some(v) = var("COMMONS_MAX_FILE_BYTES") {
             c.max_file_bytes = v.parse()?;
         }
