@@ -33,6 +33,13 @@ A *commons* is a shared resource that a community looks after together. Team com
 
 Commons isn't ready to run yet. Setup instructions will appear here once the first version is available.
 
+For development (Rust via rustup, the `wasm32-unknown-unknown` target, `trunk`, `tauri-cli`, and Docker):
+
+- `cargo xtask dev` starts Postgres in Docker and a local `commonsd` on `http://127.0.0.1:8080`, then builds and runs the desktop app.
+- `cargo xtask app` builds the desktop app once and runs it. Extra arguments and environment pass through to the app.
+
+Both build once with `cargo tauri build --debug --no-bundle` and run `target/debug/commons-desktop` directly; rerun them to pick up changes. Avoid `cargo tauri dev`: it rebuilds on every workspace change, and on macOS a Ctrl+C can leave its cleanup script spinning. Debug builds keep session tokens in `secrets.json` in the app's data directory rather than the keychain, because each rebuild changes the binary's signature and the keychain would ask for a password on every launch. Set `COMMONS_SECRETS=keychain` or `file` to choose either store.
+
 ## Contributing
 
 Commons is built in the open, and every kind of help counts: code, design, docs, testing, and ideas.

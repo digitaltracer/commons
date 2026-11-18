@@ -1,0 +1,9 @@
+# `cargo tauri dev` watches every workspace crate the app depends on, dev-dependencies
+# included, so a change under crates/server rebuilds the app. These never affect it.
+# This file sits at the workspace root: the CLI applies a .taurignore only to paths below it.
+/crates/server/
+/xtask/
+/docs/
+/deploy/
+/.agents/
+/target/

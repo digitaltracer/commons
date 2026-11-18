@@ -32,13 +32,15 @@ fn root() -> PathBuf {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("dev") => dev(),
+        Some("dev") => dev(&args[1..]),
+        Some("app") => app(&args[1..]),
         Some("check-deps") => check_deps(),
         Some("spike") => spike(),
         Some("openapi") => openapi(),
         _ => {
-            eprintln!("usage: cargo xtask <dev | check-deps | spike | openapi>");
+            eprintln!("usage: cargo xtask <dev | app | check-deps | spike | openapi>");
             eprintln!("  dev         start Postgres in Docker, run commonsd and the desktop app");
+            eprintln!("  app         build the desktop app once and run it (no file watcher)");
             eprintln!("  check-deps  fail if the UI crate links storage or network crates");
             eprintln!("  spike       build the app and measure the M0 webview spike");
             eprintln!("  openapi     write docs/api/openapi.json");
@@ -65,7 +67,36 @@ fn output(cmd: &mut Command) -> Result<String> {
 const DEV_PG: &str = "commons-dev-pg";
 const DEV_URL: &str = "postgres://commons:commons@127.0.0.1:5544/commons";
 
-fn dev() -> Result<()> {
+/// Builds the desktop app once, with the trunk-built UI embedded, and returns its binary.
+/// Not `cargo tauri dev`: it rebuilds on any workspace change, and on macOS a Ctrl+C can
+/// orphan its cleanup script, which then spins forever.
+fn build_app() -> Result<PathBuf> {
+    run(Command::new("cargo")
+        .args(["tauri", "build", "--debug", "--no-bundle"])
+        .current_dir(root().join("apps/desktop")))?;
+    Ok(root().join(format!(
+        "target/debug/commons-desktop{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+}
+
+/// Runs the app with these arguments and this process's environment.
+fn run_app(bin: &Path, args: &[String]) -> Result<()> {
+    let status = Command::new(bin)
+        .args(args)
+        .status()
+        .with_context(|| format!("launching {}", bin.display()))?;
+    if !status.success() {
+        bail!("the app exited with {status}");
+    }
+    Ok(())
+}
+
+fn app(args: &[String]) -> Result<()> {
+    run_app(&build_app()?, args)
+}
+
+fn dev(args: &[String]) -> Result<()> {
     let running =
         output(Command::new("docker").args(["ps", "-q", "-f", &format!("name=^{DEV_PG}$")]))?;
     if running.trim().is_empty() {
@@ -100,19 +131,23 @@ fn dev() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    let mut server: Child = Command::new("cargo")
-        .args(["run", "-p", "server", "--bin", "commonsd"])
-        .env("COMMONS_DATABASE_URL", DEV_URL)
-        .env("COMMONS_FILES_DIR", root().join("target/dev-files"))
-        .current_dir(root())
-        .spawn()?;
-    let app = Command::new("cargo")
-        .args(["tauri", "dev"])
-        .current_dir(root().join("apps/desktop"))
-        .status();
+    let app = build_app()?;
+    run(Command::new("cargo")
+        .args(["build", "-p", "server", "--bin", "commonsd"])
+        .current_dir(root()))?;
+    // The binary itself, not `cargo run`, so stopping it stops the server.
+    let mut server: Child = Command::new(root().join(format!(
+        "target/debug/commonsd{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+    .env("COMMONS_DATABASE_URL", DEV_URL)
+    .env("COMMONS_FILES_DIR", root().join("target/dev-files"))
+    .current_dir(root())
+    .spawn()?;
+    let result = run_app(&app, args);
     let _ = server.kill();
-    app?;
-    Ok(())
+    let _ = server.wait();
+    result
 }
 
 // ---- check-deps ----
