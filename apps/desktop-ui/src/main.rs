@@ -8,6 +8,7 @@ mod markdown;
 mod messages;
 mod panels;
 mod search;
+mod settings;
 mod spike;
 mod state;
 mod switcher;

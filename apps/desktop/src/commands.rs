@@ -55,6 +55,18 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         recent_emoji,
         reconnect_now,
         sign_in_again,
+        server_meta,
+        oidc_sign_in,
+        oidc_sign_in_again,
+        oidc_link,
+        oidc_cancel,
+        identities,
+        unlink_identity,
+        admin_members,
+        set_member_role,
+        remove_workspace_member,
+        list_invites,
+        revoke_invite,
         save_file,
         ui_log,
         crate::spike::spike_config,
@@ -632,4 +644,187 @@ fn resolve(a: &client_core::Account, key: Uuid) -> R<Uuid> {
         .map_err(err)?
         .map(|m| m.id)
         .ok_or_else(|| "that message has not been sent yet".to_string())
+}
+
+/// Opens a URL in the system browser.
+fn open_browser(url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url).spawn()?;
+    Ok(())
+}
+
+/// What a server offers before signing in, such as its OIDC provider.
+#[tauri::command]
+async fn server_meta(host: State<'_, Host>, server_url: String) -> R<proto::api::Meta> {
+    host.core.server_meta(&server_url).await.map_err(refused)
+}
+
+/// Signs in or creates an account through the server's provider, in the system browser.
+#[tauri::command]
+async fn oidc_sign_in(
+    host: State<'_, Host>,
+    server_url: String,
+    invite: Option<String>,
+) -> R<Uuid> {
+    host.core
+        .add_account_oidc(&server_url, invite.as_deref(), open_browser)
+        .await
+        .map_err(refused)
+}
+
+#[tauri::command]
+async fn oidc_sign_in_again(host: State<'_, Host>, account_id: Uuid) -> R<()> {
+    host.core
+        .sign_in_again_oidc(account_id, open_browser)
+        .await
+        .map_err(refused)
+}
+
+#[tauri::command]
+async fn oidc_link(host: State<'_, Host>, account_id: Uuid) -> R<proto::api::IdentityList> {
+    host.core
+        .link_oidc(account_id, open_browser)
+        .await
+        .map_err(refused)
+}
+
+/// Stops a provider sign-in that is waiting for the browser.
+#[tauri::command]
+fn oidc_cancel(host: State<'_, Host>) {
+    host.core.cancel_oidc();
+}
+
+#[tauri::command]
+async fn identities(host: State<'_, Host>, account_id: Uuid) -> R<proto::api::IdentityList> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.api(Method::Get, "/me/identities", &[], None::<&()>, None)
+        .await
+        .map_err(refusal)
+}
+
+#[tauri::command]
+async fn unlink_identity(host: State<'_, Host>, account_id: Uuid, identity_id: Uuid) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let _: serde_json::Value = a
+        .api(
+            Method::Delete,
+            &format!("/me/identities/{identity_id}"),
+            &[],
+            None::<&()>,
+            None,
+        )
+        .await
+        .map_err(refusal)?;
+    Ok(())
+}
+
+/// Members with role, join date and online state (owners and admins).
+#[tauri::command]
+async fn admin_members(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+) -> R<proto::api::AdminMemberList> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.api(
+        Method::Get,
+        &format!("/workspaces/{workspace_id}/admin/members"),
+        &[],
+        None::<&()>,
+        None,
+    )
+    .await
+    .map_err(refusal)
+}
+
+#[tauri::command]
+async fn set_member_role(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: proto::model::Role,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let _: serde_json::Value = a
+        .api(
+            Method::Patch,
+            &format!("/workspaces/{workspace_id}/members/{user_id}"),
+            &[],
+            Some(&proto::api::SetRole { role }),
+            None,
+        )
+        .await
+        .map_err(refusal)?;
+    Ok(())
+}
+
+/// Removes someone from the workspace, which ends their access to all of it.
+#[tauri::command]
+async fn remove_workspace_member(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let _: serde_json::Value = a
+        .api(
+            Method::Delete,
+            &format!("/workspaces/{workspace_id}/members/{user_id}"),
+            &[],
+            None::<&()>,
+            None,
+        )
+        .await
+        .map_err(refusal)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_invites(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+) -> R<proto::api::InviteList> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.api(
+        Method::Get,
+        &format!("/workspaces/{workspace_id}/invites"),
+        &[],
+        None::<&()>,
+        None,
+    )
+    .await
+    .map_err(refusal)
+}
+
+#[tauri::command]
+async fn revoke_invite(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    invite_id: Uuid,
+) -> R<()> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let _: serde_json::Value = a
+        .api(
+            Method::Delete,
+            &format!("/workspaces/{workspace_id}/invites/{invite_id}"),
+            &[],
+            None::<&()>,
+            None,
+        )
+        .await
+        .map_err(refusal)?;
+    Ok(())
 }

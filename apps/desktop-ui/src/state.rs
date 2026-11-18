@@ -56,6 +56,13 @@ pub enum Overlay {
         workspace_id: Uuid,
     },
     JoinInvite,
+    /// Account settings: ways to sign in.
+    Account(Uuid),
+    /// Members, roles and invites of a workspace (owners and admins).
+    Admin {
+        account_id: Uuid,
+        workspace_id: Uuid,
+    },
 }
 
 #[derive(Clone, Copy)]

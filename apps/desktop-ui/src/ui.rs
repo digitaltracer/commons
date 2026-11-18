@@ -37,6 +37,8 @@ pub enum Icon {
     Check,
     Server,
     Leave,
+    Settings,
+    Shield,
 }
 
 fn path(i: Icon) -> &'static str {
@@ -85,6 +87,8 @@ fn path(i: Icon) -> &'static str {
         Icon::Check => "m5 12 5 5 9-10",
         Icon::Server => "M4 4h16v7H4zM4 13h16v7H4zM8 7.5h.01M8 16.5h.01",
         Icon::Leave => "M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 17l-5-5 5-5M5 12h11",
+        Icon::Settings => "M4 7h9M17 7h3M15 5v4M4 17h3M11 17h9M9 15v4",
+        Icon::Shield => "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
     }
 }
 

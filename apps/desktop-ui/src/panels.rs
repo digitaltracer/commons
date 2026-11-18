@@ -567,6 +567,28 @@ fn sign_in(
     });
 }
 
+/// Signs the account back in through the server's provider, in the browser.
+fn oidc_sign_in_again(
+    account_id: Uuid,
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    done: impl Fn() + 'static,
+) {
+    if busy.get_untracked() {
+        return;
+    }
+    busy.set(true);
+    error.set(None);
+    leptos::task::spawn_local(async move {
+        let args = json!({"accountId": account_id});
+        match ipc::invoke::<serde_json::Value>("oidc_sign_in_again", args).await {
+            Ok(_) => done(),
+            Err(e) => error.set(Some(e)),
+        }
+        busy.set(false);
+    });
+}
+
 /// Focuses the element each time it is mounted; `autofocus` only applies on page load.
 fn focus_when_mounted<E>(node: NodeRef<E>)
 where
@@ -595,6 +617,13 @@ pub fn SessionCard(account_id: Uuid) -> impl IntoView {
     focus_when_mounted(cancel);
     let info = Memo::new(move |_| c.account(account_id).as_ref().and_then(signed_out));
     let pending = Memo::new(move |_| c.account(account_id).map(|a| waiting(&a)).unwrap_or(0));
+    let provider = crate::settings::provider_of(
+        c.account(account_id)
+            .map(|a| a.server_url)
+            .unwrap_or_default(),
+    );
+    let oidc_busy = RwSignal::new(false);
+    let start_oidc = move || oidc_sign_in_again(account_id, oidc_busy, error, || {});
     move || {
         let s = info.get()?;
         let host = s.host.clone();
@@ -635,6 +664,11 @@ pub fn SessionCard(account_id: Uuid) -> impl IntoView {
                                     if pending.get() == 1 { "waits" } else { "wait" })}</span>
                             })}
                         </div>
+                        {move || provider.get().map(|p| view! {
+                            <div class="sess-f">
+                                <crate::settings::ProviderButton name=p.clone() busy=oidc_busy label=format!("Continue with {p}") on_start=start_oidc />
+                            </div>
+                        })}
                         <form class="sess-f" on:submit=move |ev| {
                             ev.prevent_default();
                             sign_in(account_id, password, busy, error, || {});
@@ -705,11 +739,26 @@ pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
             c.overlay.set(Overlay::None)
         });
     };
+    let provider = crate::settings::provider_of(
+        c.account(account_id)
+            .map(|a| a.server_url)
+            .unwrap_or_default(),
+    );
+    let oidc_busy = RwSignal::new(false);
+    let start_oidc = move || {
+        oidc_sign_in_again(account_id, oidc_busy, error, move || {
+            c.overlay.set(Overlay::None)
+        })
+    };
     view! {
         <Dialog label=format!("Sign in to {host}")>
             <form on:submit=submit>
                 <div class="dbody">
                     <p class="muted" style="margin: 0">{reason}</p>
+                    {move || provider.get().map(|p| view! {
+                        <crate::settings::ProviderButton name=p.clone() busy=oidc_busy label=format!("Continue with {p}") on_start=start_oidc />
+                        <div class="divider" role="separator"><span>"or with the password"</span></div>
+                    })}
                     <label class="flabel">"Email"<input class="field" type="email" readonly autocomplete="username" prop:value=email /></label>
                     <label class="flabel">"Password"<input class="field" type="password" required autocomplete="current-password"
                         readonly=move || busy.get() node_ref=password_field

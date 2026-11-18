@@ -14,6 +14,7 @@ use crate::panels::{
     Tools,
 };
 use crate::search::SearchView;
+use crate::settings::{AccountSettings, ProviderButton, WorkspaceAdmin, settings_button};
 use crate::spike;
 use crate::state::{Aside, Ctx, Mode, Overlay, Place, Selection, ctx, is_dm};
 use crate::switcher::{Switcher, status_label};
@@ -209,6 +210,13 @@ fn overlay(o: Overlay) -> AnyView {
             workspace_id,
         } => view! { <InvitePeople account_id=account_id workspace_id=workspace_id /> }.into_any(),
         Overlay::JoinInvite => view! { <JoinInvite /> }.into_any(),
+        Overlay::Account(a) => view! { <AccountSettings account_id=a /> }.into_any(),
+        Overlay::Admin {
+            account_id,
+            workspace_id,
+        } => {
+            view! { <WorkspaceAdmin account_id=account_id workspace_id=workspace_id /> }.into_any()
+        }
         Overlay::Person {
             account_id,
             user_id,
@@ -377,6 +385,8 @@ fn Side() -> impl IntoView {
                         {ws.as_ref().filter(|w| matches!(w.role, Some(Role::Owner | Role::Admin))).map(|w| {
                             let workspace_id = w.id;
                             view! {
+                                <button class="iconbtn" aria-label="Manage workspace" title="Manage workspace"
+                                    on:click=move |_| c.overlay.set(Overlay::Admin { account_id, workspace_id })>{icon(Icon::Shield)}</button>
                                 <button class="iconbtn" aria-label="Invite people" title="Invite people"
                                     on:click=move |_| c.overlay.set(Overlay::Invite { account_id, workspace_id })>{icon(Icon::Members)}</button>
                             }
@@ -434,6 +444,7 @@ fn Side() -> impl IntoView {
                         </div>
                         <button class="iconbtn" aria-label="Notification preferences"
                             on:click=move |_| c.overlay.set(Overlay::Prefs(account_id))>{icon(Icon::Bell)}</button>
+                        {settings_button(account_id)}
                     </div>
                 }
             })}
@@ -665,6 +676,49 @@ fn SignIn() -> impl IntoView {
         set_invite(link);
         register.set(true);
     }
+    // Whether the server offers a provider, re-asked as the address settles.
+    let provider = RwSignal::new(None::<String>);
+    let oidc_busy = RwSignal::new(false);
+    let asked = StoredValue::new(0u32);
+    Effect::new(move |_| {
+        let url = server.get();
+        let n = asked.get_value() + 1;
+        asked.set_value(n);
+        provider.set(None);
+        set_timeout(
+            move || {
+                if asked.get_value() != n {
+                    return;
+                }
+                leptos::task::spawn_local(async move {
+                    let meta =
+                        ipc::invoke::<proto::api::Meta>("server_meta", json!({"serverUrl": url}))
+                            .await;
+                    if asked.get_value() == n {
+                        provider.set(meta.ok().and_then(|m| m.oidc).map(|o| o.name));
+                    }
+                });
+            },
+            std::time::Duration::from_millis(400),
+        );
+    });
+    let start_oidc = move || {
+        oidc_busy.set(true);
+        error.set(None);
+        let token = invite
+            .with_untracked(|i| (!i.trim().is_empty()).then(|| proto::api::split_invite(i).1));
+        let args = json!({"serverUrl": server.get_untracked(), "invite": token});
+        leptos::task::spawn_local(async move {
+            match ipc::invoke::<Uuid>("oidc_sign_in", args).await {
+                Ok(id) => {
+                    c.adding.set(false);
+                    c.go_to_workspace(id, None);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            oidc_busy.set(false);
+        });
+    };
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         busy.set(true);
@@ -696,6 +750,10 @@ fn SignIn() -> impl IntoView {
                 <label class="flabel">"Invite link (optional)" <input class="field" placeholder="https://…/invite#…"
                     prop:value=move || invite.get() on:input=move |ev| set_invite(event_target_value(&ev)) /></label>
                 <label class="flabel">"Server" <input class="field" type="url" required prop:value=move || server.get() on:input=move |ev| server.set(event_target_value(&ev)) /></label>
+                {move || provider.get().map(|p| view! {
+                    <ProviderButton name=p.clone() busy=oidc_busy label=format!("Continue with {p}") on_start=start_oidc />
+                    <div class="divider" role="separator"><span>"or with email"</span></div>
+                })}
                 <label class="flabel">"Email" <input class="field" type="email" required autocomplete="username" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                 <label class="flabel">"Password" <input class="field" type="password" required minlength="8" autocomplete="current-password" prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) /></label>
                 <label class="chk"><input type="checkbox" prop:checked=move || register.get() on:change=move |ev| register.set(event_target_checked(&ev)) />" Create a new account"</label>
@@ -703,7 +761,7 @@ fn SignIn() -> impl IntoView {
                     <label class="flabel">"Display name" <input class="field" required prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) /></label>
                 </Show>
                 {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
-                <button type="submit" class="btn primary wide" disabled=move || busy.get()>{move || if register.get() { "Create account" } else { "Sign in" }}</button>
+                <button type="submit" class="btn primary wide" disabled=move || busy.get() || oidc_busy.get()>{move || if register.get() { "Create account" } else { "Sign in" }}</button>
                 <Show when=can_cancel>
                     <button type="button" class="btn wide" on:click=move |_| c.adding.set(false)>"Cancel"</button>
                 </Show>
