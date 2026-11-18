@@ -35,6 +35,59 @@ pub struct Config {
     pub max_file_bytes: u64,
     pub user_quota_bytes: u64,
     pub registration: Registration,
+    /// Sign-in through an OIDC provider; on only when all four `COMMONS_OIDC_*` are set.
+    pub oidc: Option<OidcConfig>,
+}
+
+#[derive(Clone)]
+pub struct OidcConfig {
+    /// For example `https://accounts.google.com`; discovery is read from under it.
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    /// The provider's name on the sign-in button, for example "Google".
+    pub name: String,
+}
+
+impl std::fmt::Debug for OidcConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OidcConfig {
+    /// All four set: on. None set: off. Some set: off, naming the missing ones.
+    pub fn from_vars(
+        issuer: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        name: Option<String>,
+    ) -> Result<Option<Self>, Vec<&'static str>> {
+        match (issuer, client_id, client_secret, name) {
+            (Some(issuer), Some(client_id), Some(client_secret), Some(name)) => {
+                Ok(Some(OidcConfig {
+                    issuer: issuer.trim().trim_end_matches('/').to_string(),
+                    client_id: client_id.trim().to_string(),
+                    client_secret: client_secret.trim().to_string(),
+                    name: name.trim().to_string(),
+                }))
+            }
+            (None, None, None, None) => Ok(None),
+            (i, c, s, n) => Err([
+                ("COMMONS_OIDC_ISSUER", i.is_none()),
+                ("COMMONS_OIDC_CLIENT_ID", c.is_none()),
+                ("COMMONS_OIDC_CLIENT_SECRET", s.is_none()),
+                ("COMMONS_OIDC_NAME", n.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(k, missing)| missing.then_some(k))
+            .collect()),
+        }
+    }
 }
 
 /// Who may create an account through `/v1/auth/register`.
@@ -72,6 +125,7 @@ impl Default for Config {
             max_file_bytes: 2 << 30,
             user_quota_bytes: 20 << 30,
             registration: Registration::Open,
+            oidc: None,
         }
     }
 }
@@ -115,6 +169,21 @@ impl Config {
             var("COMMONS_REGISTRATION").as_deref(),
             var("COMMONS_REGISTRATION_ALLOWLIST").as_deref(),
         )?;
+        c.oidc = match OidcConfig::from_vars(
+            var("COMMONS_OIDC_ISSUER"),
+            var("COMMONS_OIDC_CLIENT_ID"),
+            var("COMMONS_OIDC_CLIENT_SECRET"),
+            var("COMMONS_OIDC_NAME"),
+        ) {
+            Ok(o) => o,
+            Err(missing) => {
+                tracing::warn!(
+                    ?missing,
+                    "OIDC sign-in is off: set all four COMMONS_OIDC_* variables"
+                );
+                None
+            }
+        };
         Ok(c)
     }
 }

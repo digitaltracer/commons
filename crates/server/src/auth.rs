@@ -113,7 +113,7 @@ impl FromRequestParts<AppState> for ClientIp {
 }
 
 impl ClientIp {
-    fn check(&self, state: &AppState, action: &str) -> ApiResult<()> {
+    pub(crate) fn check(&self, state: &AppState, action: &str) -> ApiResult<()> {
         match self.0 {
             Some(ip) => state.ip_limiter.check(&format!("{action}:{ip}")),
             None => Ok(()),
@@ -150,16 +150,32 @@ impl FromRequestParts<AppState> for AuthUser {
 }
 
 pub async fn session_user(pool: &sqlx::PgPool, hash: &[u8; 32]) -> ApiResult<Option<Uuid>> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as("SELECT user_id FROM sessions WHERE token_hash = $1 AND revoked_at IS NULL")
-            .bind(&hash[..])
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT s.user_id FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND u.deactivated_at IS NULL",
+    )
+    .bind(&hash[..])
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(|r| r.0))
 }
 
+/// Revokes every session of `user_id` and closes their sockets once the caller commits.
+pub async fn revoke_user_sessions(conn: &mut sqlx::PgConnection, user_id: Uuid) -> ApiResult<u64> {
+    let sql = format!(
+        "WITH r AS (UPDATE sessions SET revoked_at = now()
+                     WHERE user_id = $1 AND revoked_at IS NULL RETURNING token_hash)
+         {NOTIFY_REVOKED}"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(rows.len() as u64)
+}
+
 /// Tells every node to close sockets of the sessions in `r`; delivered only on commit.
-const NOTIFY_REVOKED: &str =
+pub(crate) const NOTIFY_REVOKED: &str =
     "SELECT pg_notify('commons', 's:' || encode(r.token_hash, 'hex')) FROM r";
 
 pub fn new_token() -> String {
@@ -190,7 +206,7 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn normalise_email(email: &str) -> ApiResult<String> {
+pub(crate) fn normalise_email(email: &str) -> ApiResult<String> {
     let e = email.trim().to_lowercase();
     if e.len() < 3 || !e.contains('@') || e.len() > 254 {
         return Err(ApiError::BadRequest("invalid email".into()));
@@ -200,7 +216,7 @@ fn normalise_email(email: &str) -> ApiResult<String> {
 
 /// In invite mode, an account without an invite is allowed only as the server's first, so a
 /// fresh install can start. Concurrent first registrations are serialized.
-async fn check_bootstrap(conn: &mut sqlx::PgConnection) -> ApiResult<()> {
+pub(crate) async fn check_bootstrap(conn: &mut sqlx::PgConnection) -> ApiResult<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('commons:first-account', 0))")
         .execute(&mut *conn)
         .await?;
@@ -225,7 +241,10 @@ fn check_password(p: &str) -> ApiResult<()> {
     Ok(())
 }
 
-async fn create_session(conn: &mut sqlx::PgConnection, user_id: Uuid) -> ApiResult<String> {
+pub(crate) async fn create_session(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> ApiResult<String> {
     let token = new_token();
     sqlx::query("INSERT INTO sessions (token_hash, user_id) VALUES ($1, $2)")
         .bind(&hash_token(&token)[..])
@@ -318,12 +337,15 @@ pub async fn login(
     ip.check(&state, "login")?;
     let email = normalise_email(&req.email)?;
     state.limiter.check(&format!("login:{email}"))?;
-    let row: Option<(Uuid, String, String)> =
-        sqlx::query_as("SELECT id, password_hash, display_name FROM users WHERE email = $1")
-            .bind(&email)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((id, hash, display_name)) = row else {
+    // Accounts without a password (made through OIDC) and deactivated ones can't sign in here.
+    let row: Option<(Uuid, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, password_hash, display_name FROM users
+          WHERE email = $1 AND deactivated_at IS NULL",
+    )
+    .bind(&email)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((id, Some(hash), display_name)) = row else {
         return Err(ApiError::Unauthorized);
     };
     let password = req.password.clone();
@@ -461,3 +483,44 @@ pub async fn reset_confirm(
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// Where a reset link opens: a form that sets the new password. The token rides in the
+/// fragment (`/reset#…`), so it never reaches a request line or access log.
+pub async fn reset_page() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::REFERRER_POLICY, "no-referrer"),
+        ],
+        axum::response::Html(RESET_PAGE),
+    )
+}
+
+const RESET_PAGE: &str = r#"<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Reset your Commons password</title>
+<style>body{font:16px system-ui,sans-serif;max-width:28rem;margin:3rem auto;padding:0 1rem}
+label,input,button{display:block;width:100%;box-sizing:border-box}input{margin:.25rem 0 1rem;
+padding:.5rem;font:inherit}button{padding:.6rem;font:inherit}#msg{margin-top:1rem}</style>
+<h1>Set a new password</h1>
+<form id=f><label for=p1>New password (at least 8 characters)</label>
+<input id=p1 type=password autocomplete=new-password minlength=8 required>
+<label for=p2>Repeat it</label>
+<input id=p2 type=password autocomplete=new-password minlength=8 required>
+<button>Set password</button></form><p id=msg role=status></p>
+<script>
+const q=new URLSearchParams(location.search);
+const token=location.hash.slice(1)||q.get("token")||"";
+history.replaceState(null,"",location.pathname);
+const msg=document.getElementById("msg"),f=document.getElementById("f");
+if(!token){f.hidden=true;msg.textContent="This link is missing its code. Ask for a new one.";}
+f.onsubmit=async e=>{e.preventDefault();
+ const p=document.getElementById("p1").value;
+ if(p!==document.getElementById("p2").value){msg.textContent="The passwords don't match.";return;}
+ const r=await fetch("/v1/auth/reset/confirm",{method:"POST",
+  headers:{"content-type":"application/json"},body:JSON.stringify({token,password:p})});
+ if(r.ok){f.hidden=true;msg.textContent="Done. Sign in to Commons with your new password.";}
+ else{const b=await r.json().catch(()=>({}));
+  msg.textContent=b.message||"That didn't work. The link may have expired.";}};
+</script>
+"#;

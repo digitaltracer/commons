@@ -4,7 +4,10 @@ use crate::sqlx::PgConnection;
 use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use proto::api::{AddWorkspaceMember, CreateWorkspace, MemberList, SetRole, WorkspaceList};
+use proto::api::{
+    AddWorkspaceMember, AdminMember, AdminMemberList, CreateWorkspace, MemberList, SetRole,
+    WorkspaceList,
+};
 use proto::events::UserEventBody;
 use proto::events::{AccessVia, WorkspaceEventBody};
 use proto::model::{ConversationKind, Member, Role, Workspace};
@@ -20,6 +23,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/workspaces", get(list).post(create))
         .route("/workspaces/{id}/members", get(members).post(add_member))
+        .route("/workspaces/{id}/admin/members", get(admin_members))
         .route(
             "/workspaces/{id}/members/{user_id}",
             axum::routing::patch(set_role).delete(remove_member),
@@ -62,7 +66,7 @@ pub async fn join(
          VALUES ($1, $2, $3, $4, 0)
          ON CONFLICT (workspace_id, user_id) DO UPDATE
             SET role = EXCLUDED.role, display_name = EXCLUDED.display_name,
-                joined_seq = 0, left_seq = NULL
+                joined_seq = 0, left_seq = NULL, joined_at = now()
           WHERE workspace_members.left_seq IS NOT NULL",
     )
     .bind(workspace_id)
@@ -274,8 +278,7 @@ pub async fn add_member(
     }))
 }
 
-/// Changes a member's role. Gaining or losing admin opens or closes role-derived access to
-/// every private channel in the same transaction.
+/// Changes a member's role. Only an owner grants or removes owner, and the last owner stays.
 #[utoipa::path(patch, path = "/v1/workspaces/{id}/members/{user_id}",
     params(("id" = Uuid, Path), ("user_id" = Uuid, Path)), request_body = SetRole,
     responses((status = 204), (status = 403)))]
@@ -300,40 +303,118 @@ pub async fn set_role(
     if (old == Role::Owner || req.role == Role::Owner) && mine != Role::Owner {
         return Err(ApiError::Forbidden);
     }
-    if old == req.role {
-        return Ok(axum::http::StatusCode::NO_CONTENT);
+    change_role(&mut tx, workspace_id, user_id, old, req.role).await?;
+    tx.commit().await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Refuses to leave the workspace without an owner once `user_id` stops being one.
+async fn keep_an_owner(
+    conn: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> ApiResult<()> {
+    let others: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workspace_members
+          WHERE workspace_id = $1 AND user_id <> $2 AND left_seq IS NULL AND role = 'owner'",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if others == 0 {
+        return Err(ApiError::Refused(
+            "last_owner",
+            "a workspace needs an owner: make someone else an owner first".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Sets a member's role from `old` to `new`. Gaining or losing admin opens or closes
+/// role-derived access to every private channel in the same transaction. The caller holds the
+/// workspace lock and has checked that the actor may do this.
+pub async fn change_role(
+    conn: &mut PgConnection,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    old: Role,
+    new: Role,
+) -> ApiResult<()> {
+    if old == new {
+        return Ok(());
+    }
+    if old == Role::Owner {
+        keep_an_owner(conn, workspace_id, user_id).await?;
     }
     sqlx::query("UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace_id)
         .bind(user_id)
-        .bind(req.role.as_str())
-        .execute(&mut *tx)
+        .bind(new.as_str())
+        .execute(&mut *conn)
         .await?;
     let mut events = vec![NewEvent::workspace(WorkspaceEventBody::MemberRoleChanged {
         user_id,
-        role: req.role,
+        role: new,
     })];
-    match (
-        old.reads_private_channels(),
-        req.role.reads_private_channels(),
-    ) {
-        (false, true) => events.extend(grant_role_access(&mut tx, workspace_id, user_id).await?),
+    match (old.reads_private_channels(), new.reads_private_channels()) {
+        (false, true) => events.extend(grant_role_access(conn, workspace_id, user_id).await?),
         (true, false) => {
             let private: Vec<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM conversations WHERE workspace_id = $1 AND kind = 'private'",
             )
             .bind(workspace_id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *conn)
             .await?;
             for c in private {
-                events.extend(conversations::revoke(&mut tx, c, user_id, AccessVia::Role).await?);
+                events.extend(conversations::revoke(conn, c, user_id, AccessVia::Role).await?);
             }
         }
         _ => {}
     }
-    sync::append(&mut tx, workspace_id, events).await?;
-    tx.commit().await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    sync::append(conn, workspace_id, events).await?;
+    Ok(())
+}
+
+/// Members with their join dates and whether they are connected, for owners and admins.
+#[utoipa::path(get, path = "/v1/workspaces/{id}/admin/members", params(("id" = Uuid, Path)),
+    responses((status = 200, body = AdminMemberList), (status = 403)))]
+pub async fn admin_members(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+) -> ApiResult<Json<AdminMemberList>> {
+    let mut conn = state.pool.acquire().await?;
+    require_role(
+        &mut conn,
+        workspace_id,
+        auth.user_id,
+        &[Role::Owner, Role::Admin],
+    )
+    .await?;
+    let rows: Vec<(Uuid, String, String, time::OffsetDateTime)> = sqlx::query_as(
+        "SELECT user_id, display_name, role, joined_at FROM workspace_members
+          WHERE workspace_id = $1 AND left_seq IS NULL ORDER BY display_name",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let online: std::collections::HashSet<Uuid> =
+        state.hub.online_in(workspace_id).into_iter().collect();
+    Ok(Json(AdminMemberList {
+        members: rows
+            .into_iter()
+            .filter_map(|(user_id, display_name, role, joined)| {
+                Some(AdminMember {
+                    user_id,
+                    display_name,
+                    role: Role::parse(&role)?,
+                    joined_at_ms: crate::db::ms(joined),
+                    online: online.contains(&user_id),
+                })
+            })
+            .collect(),
+    }))
 }
 
 /// Removes someone from the workspace: every access interval closes, and the user's own
@@ -358,6 +439,9 @@ pub async fn remove_member(
         || (mine == Role::Admin && theirs != Role::Owner);
     if !allowed {
         return Err(ApiError::Forbidden);
+    }
+    if theirs == Role::Owner {
+        keep_an_owner(&mut tx, workspace_id, user_id).await?;
     }
     let mut events = conversations::revoke_all(&mut tx, workspace_id, user_id).await?;
     events.push(

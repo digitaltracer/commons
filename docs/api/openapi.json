@@ -51,6 +51,93 @@
         }
       }
     },
+    "/v1/auth/oidc/callback": {
+      "get": {
+        "tags": [
+          "crate::oidc"
+        ],
+        "summary": "Where the provider sends the browser back. Every outcome with a known flow redirects to\nthe app; an unknown, used or expired state gets a page, because there's nowhere to go.",
+        "operationId": "callback",
+        "responses": {
+          "303": {
+            "description": "back to the app"
+          },
+          "400": {}
+        }
+      }
+    },
+    "/v1/auth/oidc/exchange": {
+      "post": {
+        "tags": [
+          "crate::oidc"
+        ],
+        "operationId": "exchange",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcExchange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcExchanged"
+                }
+              }
+            }
+          },
+          "400": {},
+          "403": {},
+          "429": {}
+        }
+      }
+    },
+    "/v1/auth/oidc/start": {
+      "post": {
+        "tags": [
+          "crate::oidc"
+        ],
+        "operationId": "start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcStarted"
+                }
+              }
+            }
+          },
+          "400": {},
+          "401": {
+            "description": "link without a session"
+          },
+          "404": {
+            "description": "OIDC is off"
+          },
+          "429": {},
+          "503": {
+            "description": "the provider didn't answer"
+          }
+        }
+      }
+    },
     "/v1/auth/register": {
       "post": {
         "tags": [
@@ -548,6 +635,52 @@
         }
       }
     },
+    "/v1/me/identities": {
+      "get": {
+        "tags": [
+          "crate::oidc"
+        ],
+        "operationId": "identities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/identities/{id}": {
+      "delete": {
+        "tags": [
+          "crate::oidc"
+        ],
+        "summary": "Unlinks an identity, unless it is the account's only way to sign in.",
+        "operationId": "unlink",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {
+            "description": "the last way to sign in"
+          },
+          "404": {}
+        }
+      }
+    },
     "/v1/meta": {
       "get": {
         "tags": [
@@ -698,6 +831,38 @@
               }
             }
           }
+        }
+      }
+    },
+    "/v1/workspaces/{id}/admin/members": {
+      "get": {
+        "tags": [
+          "crate::directory"
+        ],
+        "summary": "Members with their join dates and whether they are connected, for owners and admins.",
+        "operationId": "admin_members",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminMemberList"
+                }
+              }
+            }
+          },
+          "403": {}
         }
       }
     },
@@ -1050,7 +1215,7 @@
         "tags": [
           "crate::directory"
         ],
-        "summary": "Changes a member's role. Gaining or losing admin opens or closes role-derived access to\nevery private channel in the same transaction.",
+        "summary": "Changes a member's role. Only an owner grants or removes owner, and the last owner stays.",
         "operationId": "set_role",
         "parameters": [
           {
@@ -1194,6 +1359,51 @@
           },
           "role": {
             "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "AdminMember": {
+        "type": "object",
+        "description": "A workspace member as owners and admins see them.",
+        "required": [
+          "user_id",
+          "display_name",
+          "role",
+          "joined_at_ms",
+          "online"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "joined_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "online": {
+            "type": "boolean",
+            "description": "Connected to this server node now."
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "AdminMemberList": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminMember"
+            }
           }
         }
       },
@@ -1447,6 +1657,25 @@
           "size": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "IdentityList": {
+        "type": "object",
+        "description": "The caller's ways to sign in.",
+        "required": [
+          "has_password",
+          "identities"
+        ],
+        "properties": {
+          "has_password": {
+            "type": "boolean"
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OidcIdentity"
+            }
           }
         }
       },
@@ -1746,6 +1975,17 @@
           "min_client_version": {
             "type": "string"
           },
+          "oidc": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OidcMeta",
+                "description": "Set when the server offers sign-in through an OIDC provider."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "protocol_version": {
             "type": "integer",
             "format": "int32",
@@ -1813,6 +2053,143 @@
           "all_messages",
           "thread_reply"
         ]
+      },
+      "OidcExchange": {
+        "type": "object",
+        "description": "Exchanges the handoff code from the return redirect, with the verifier for its challenge.",
+        "required": [
+          "code",
+          "code_verifier"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "code_verifier": {
+            "type": "string"
+          }
+        }
+      },
+      "OidcExchanged": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A sign-in: a new session for the account.",
+            "required": [
+              "session",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "session"
+                ]
+              },
+              "session": {
+                "$ref": "#/components/schemas/SessionResponse"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A link: the caller's identities, including the new one.",
+            "required": [
+              "identities",
+              "kind"
+            ],
+            "properties": {
+              "identities": {
+                "$ref": "#/components/schemas/IdentityList"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "linked"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "OidcIdentity": {
+        "type": "object",
+        "required": [
+          "id",
+          "issuer",
+          "created_at_ms"
+        ],
+        "properties": {
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issuer": {
+            "type": "string"
+          }
+        }
+      },
+      "OidcMeta": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The provider's name for the button, as in \"Continue with Google\"."
+          }
+        }
+      },
+      "OidcStart": {
+        "type": "object",
+        "description": "Starts an OIDC sign-in. The app opens `authorize_url` in the system browser; the browser\ncomes back to `return_to` with `code`, or with `error` and `message`.",
+        "required": [
+          "return_to",
+          "code_challenge"
+        ],
+        "properties": {
+          "code_challenge": {
+            "type": "string",
+            "description": "The app's PKCE challenge for the handoff: base64url(SHA-256(verifier)), unpadded."
+          },
+          "invite": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An invite token or link, for a new account in invite mode."
+          },
+          "link": {
+            "type": "boolean",
+            "description": "Link the provider identity to the signed-in caller instead of signing in."
+          },
+          "return_to": {
+            "type": "string",
+            "description": "A loopback address the app listens on, `http://127.0.0.1:<port>/<path>` (RFC 8252)."
+          }
+        }
+      },
+      "OidcStarted": {
+        "type": "object",
+        "required": [
+          "authorize_url"
+        ],
+        "properties": {
+          "authorize_url": {
+            "type": "string"
+          }
+        }
       },
       "OpenDm": {
         "type": "object",

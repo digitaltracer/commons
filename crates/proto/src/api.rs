@@ -22,6 +22,92 @@ pub struct Meta {
     pub protocol_version: u32,
     pub server_version: String,
     pub min_client_version: String,
+    /// Set when the server offers sign-in through an OIDC provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OidcMeta {
+    /// The provider's name for the button, as in "Continue with Google".
+    pub name: String,
+}
+
+/// Starts an OIDC sign-in. The app opens `authorize_url` in the system browser; the browser
+/// comes back to `return_to` with `code`, or with `error` and `message`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OidcStart {
+    /// A loopback address the app listens on, `http://127.0.0.1:<port>/<path>` (RFC 8252).
+    pub return_to: String,
+    /// The app's PKCE challenge for the handoff: base64url(SHA-256(verifier)), unpadded.
+    pub code_challenge: String,
+    /// An invite token or link, for a new account in invite mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<String>,
+    /// Link the provider identity to the signed-in caller instead of signing in.
+    #[serde(default)]
+    pub link: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OidcStarted {
+    pub authorize_url: String,
+}
+
+/// Exchanges the handoff code from the return redirect, with the verifier for its challenge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OidcExchange {
+    pub code: String,
+    pub code_verifier: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OidcExchanged {
+    /// A sign-in: a new session for the account.
+    Session { session: SessionResponse },
+    /// A link: the caller's identities, including the new one.
+    Linked { identities: IdentityList },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OidcIdentity {
+    pub id: Uuid,
+    pub issuer: String,
+    pub email: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// The caller's ways to sign in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct IdentityList {
+    pub has_password: bool,
+    pub identities: Vec<OidcIdentity>,
+}
+
+/// A workspace member as owners and admins see them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AdminMember {
+    pub user_id: Uuid,
+    pub display_name: String,
+    pub role: Role,
+    pub joined_at_ms: i64,
+    /// Connected to this server node now.
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AdminMemberList {
+    pub members: Vec<AdminMember>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

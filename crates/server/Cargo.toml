@@ -46,13 +46,17 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 pdf-extract = "0.12"
 bytes = "1"
 mime_guess = "2"
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query", "form"] }
+url = "2"
 
 [dev-dependencies]
 server = { path = ".", features = ["testing"] }
 tokio-tungstenite = "0.30"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "form"] }
 proptest = "1"
 goose = { version = "0.19", default-features = false, features = ["rustls-tls"] }
+aws-lc-rs = "1"
 
 [lints]
 workspace = true

@@ -27,6 +27,9 @@ pub enum ApiError {
     RateLimited,
     #[error("unsupported client")]
     UpgradeRequired,
+    /// A service the server depends on, such as the OIDC provider, didn't answer.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -54,6 +57,7 @@ impl IntoResponse for ApiError {
             ApiError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
             ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::UpgradeRequired => (StatusCode::UPGRADE_REQUIRED, "upgrade_required"),
+            ApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             ApiError::Internal(e) => {
                 tracing::error!(error = ?e, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")

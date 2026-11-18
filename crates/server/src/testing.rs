@@ -122,7 +122,7 @@ pub async fn spawn(tweak: impl FnOnce(&mut Config)) -> TestServer {
     spawn_with(config).await
 }
 
-pub async fn spawn_with(config: Config) -> TestServer {
+pub async fn spawn_with(mut config: Config) -> TestServer {
     // Server logs for a test run, filtered by COMMONS_TEST_LOG (for example "warn").
     if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_env("COMMONS_TEST_LOG") {
         let _ = tracing_subscriber::fmt()
@@ -130,13 +130,17 @@ pub async fn spawn_with(config: Config) -> TestServer {
             .with_test_writer()
             .try_init();
     }
-    let mailer = Arc::new(MemoryMailer::default());
-    let state = AppState::new(config, mailer.clone()).await.expect("state");
-    let cancel = crate::spawn_background(&state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
+    // Links and the OIDC redirect point at this server, unless a test set its own URL.
+    if config.public_url == Config::default().public_url {
+        config.public_url = format!("http://{addr}");
+    }
+    let mailer = Arc::new(MemoryMailer::default());
+    let state = AppState::new(config, mailer.clone()).await.expect("state");
+    let cancel = crate::spawn_background(&state);
     let app = crate::router(state.clone());
     let stop = cancel.clone();
     tokio::spawn(async move {

@@ -3,6 +3,7 @@
 //! Modules follow decision 7: auth, directory, conversations, messages, sync, files, search
 //! and notify, plus the hub (real-time fan-out) and jobs (background work).
 
+pub mod admin;
 pub mod auth;
 pub mod config;
 pub mod conversations;
@@ -19,6 +20,7 @@ pub mod mail;
 pub mod me;
 pub mod messages;
 pub mod notify;
+pub mod oidc;
 pub mod openapi;
 pub mod search;
 pub mod sqlx;
@@ -46,6 +48,7 @@ pub struct Inner {
     /// Passwords hashed for registration since start.
     pub password_hashes: std::sync::atomic::AtomicU64,
     pub files: Arc<dyn object_store::ObjectStore>,
+    pub oidc: Option<oidc::Provider>,
 }
 
 /// Shared server state. Cheap to clone.
@@ -79,6 +82,7 @@ impl AppState {
         let ip_limiter = auth::Limiter::new(config.auth_attempts_per_minute.saturating_mul(5));
         let hub = hub::Hub::new(config.connection_queue);
         let files = files::open_store(&config)?;
+        let oidc = config.oidc.clone().map(oidc::Provider::new).transpose()?;
         Ok(AppState(Arc::new(Inner {
             pool,
             config,
@@ -89,6 +93,7 @@ impl AppState {
             ip_limiter,
             password_hashes: std::sync::atomic::AtomicU64::new(0),
             files,
+            oidc,
         })))
     }
 }
@@ -98,6 +103,7 @@ pub fn router(state: AppState) -> Router {
         .route("/meta", get(meta))
         .route("/openapi.json", get(openapi::serve))
         .merge(auth::routes())
+        .merge(oidc::routes())
         .merge(directory::routes())
         .merge(invites::routes())
         .merge(conversations::routes())
@@ -111,6 +117,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/v1", v1)
         .route("/invite", get(invites::landing))
+        .route("/reset", get(auth::reset_page))
         // Links made before the token moved into the fragment.
         .route("/invite/{token}", get(invites::landing))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -137,6 +144,9 @@ pub async fn meta(
         protocol_version: proto::PROTOCOL_VERSION,
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         min_client_version: state.config.min_client_version.clone(),
+        oidc: state.config.oidc.as_ref().map(|o| proto::api::OidcMeta {
+            name: o.name.clone(),
+        }),
     })
 }
 
