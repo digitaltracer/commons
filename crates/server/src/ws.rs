@@ -358,9 +358,12 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         // the first replay's access check, then replay again to cover the gap before
         // wakeups started.
         session.drain_all().await?;
+        let checked: Vec<Uuid> = session.workspaces.keys().copied().collect();
+        state.hub.set_workspaces(reg.id, checked);
+        session.drain_all().await?;
+        // The second replay can drop a workspace too; register and announce what is left.
         ws_ids = session.workspaces.keys().copied().collect();
         state.hub.set_workspaces(reg.id, ws_ids.clone());
-        session.drain_all().await?;
         if state.hub.connections(user_id) == 1 {
             publish_presence(&state, user_id, &ws_ids, true).await;
         }
