@@ -90,3 +90,42 @@ async fn password_reset_closes_every_socket() {
     assert_eq!(s, 204, "{v}");
     assert!(a.closed_within(Duration::from_secs(5)).await);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revocation_missed_by_the_listener_still_closes_the_socket() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let w = workspace(&srv, &alice, &[]).await;
+    let other = login(&srv, &alice).await;
+    let us = user_seq(&srv, alice.id).await;
+    let h = head(&srv, w.id).await;
+    let mut revoked = open_socket(&srv, &alice.token, us, &[(w.id, h)]).await;
+    let mut kept = open_socket(&srv, &other, us, &[(w.id, h)]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Revoke with no NOTIFY, as if it was sent while the listener was down.
+    server::sqlx::query("UPDATE sessions SET revoked_at = now() WHERE token_hash = $1")
+        .bind(&server::auth::hash_token(&alice.token)[..])
+        .execute(srv.pool())
+        .await
+        .unwrap();
+    assert!(!revoked.closed_within(Duration::from_millis(500)).await);
+
+    // Drop the listener's connection; it reconnects and rechecks sessions.
+    let killed: i64 = server::sqlx::query_scalar(
+        "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
+          WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
+    )
+    .fetch_one(srv.pool())
+    .await
+    .unwrap();
+    assert_eq!(killed, 1, "the listener connection");
+    assert!(
+        revoked.closed_within(Duration::from_secs(5)).await,
+        "closed after the gap"
+    );
+    assert!(
+        !kept.closed_within(Duration::from_millis(500)).await,
+        "the live session stays"
+    );
+}

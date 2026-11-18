@@ -152,6 +152,40 @@ impl Hub {
         }
     }
 
+    /// Closes sockets whose session was revoked while revocation NOTIFYs could not arrive.
+    /// One query for every open socket; on a database error the sockets stay open.
+    pub async fn recheck_sessions(&self, pool: &sqlx::PgPool) {
+        let mut sessions: Vec<Vec<u8>> = {
+            let inner = self.lock();
+            inner.conns.values().map(|c| c.session.to_vec()).collect()
+        };
+        sessions.sort();
+        sessions.dedup();
+        if sessions.is_empty() {
+            return;
+        }
+        let live: Vec<Vec<u8>> = match sqlx::query_scalar(
+            "SELECT token_hash FROM sessions WHERE token_hash = ANY($1) AND revoked_at IS NULL",
+        )
+        .bind(&sessions)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = ?e, "session recheck failed");
+                return;
+            }
+        };
+        let live: HashSet<Vec<u8>> = live.into_iter().collect();
+        let inner = self.lock();
+        for c in inner.conns.values() {
+            if !live.contains(c.session.as_slice()) {
+                c.cancel.cancel();
+            }
+        }
+    }
+
     pub fn connections(&self, user_id: Uuid) -> usize {
         self.lock().by_user.get(&user_id).map_or(0, |s| s.len())
     }
@@ -297,8 +331,11 @@ pub async fn listen(state: AppState, cancel: CancellationToken) {
             tracing::warn!(error = ?e, "LISTEN failed");
             continue;
         }
+        // Anything NOTIFYed while not listening was lost: re-read every stream, and recheck
+        // every socket's session in case a revocation was among it.
         state.hub.wake_all();
         state.feeds.wake_all();
+        state.hub.recheck_sessions(&state.pool).await;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -306,8 +343,7 @@ pub async fn listen(state: AppState, cancel: CancellationToken) {
                     Ok(Some(n)) => state.hub.dispatch(&state, n.payload()),
                     Ok(None) => {
                         tracing::warn!("notify listener reconnecting");
-                        state.hub.wake_all();
-                        state.feeds.wake_all();
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!(error = ?e, "notify listener error");
