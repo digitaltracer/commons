@@ -378,7 +378,7 @@ async fn invite_mode_needs_a_valid_invite_and_redeems_it() {
         Method::POST,
         &owner,
         &format!("/workspaces/{}/invites", w.id),
-        Some(serde_json::json!({"role": "guest"})),
+        Some(serde_json::json!({"role": "guest", "email": "ada@example.org"})),
     )
     .await;
     let invite: InviteCreated = serde_json::from_value(v).unwrap();
@@ -398,6 +398,65 @@ async fn invite_mode_needs_a_valid_invite_and_redeems_it() {
         code, "invite_used",
         "an existing identity still checks the invite"
     );
+}
+
+async fn invite_for(srv: &TestServer, owner: &Person, ws: Uuid, email: &str) -> InviteCreated {
+    let v = ok(
+        srv,
+        Method::POST,
+        owner,
+        &format!("/workspaces/{ws}/invites"),
+        Some(serde_json::json!({"role": "member", "email": email})),
+    )
+    .await;
+    serde_json::from_value(v).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_account_needs_the_invited_address_verified_by_the_provider() {
+    let fake = fake_provider().await;
+    let srv = spawn(&fake, Registration::Invite).await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let inv = invite_for(&srv, &owner, w.id, "Pat@Example.org").await;
+
+    // A different address, then the right one unverified: refused, nothing stored.
+    set_next(&fake, |n| *n = Next::person("sub-m", "mallory@example.org"));
+    let (code, message) = sign_in(&srv, Some(&inv.link)).await.unwrap_err();
+    assert_eq!(code, "invite_email_mismatch");
+    assert!(!message.contains("pat@"), "{message}");
+    set_next(&fake, |n| {
+        *n = Next::person("sub-p", "pat@example.org");
+        n.email_verified = false;
+    });
+    let (code, _) = sign_in(&srv, Some(&inv.link)).await.unwrap_err();
+    assert_eq!(code, "invite_email_mismatch");
+    assert_eq!((users(&srv).await, identities(&srv).await), (1, 0));
+
+    // The invited address, verified, in another case.
+    set_next(&fake, |n| *n = Next::person("sub-p", "PAT@example.org"));
+    let (_, id) = sign_in(&srv, Some(&inv.link)).await.unwrap();
+    let email: String = server::sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_one(srv.pool())
+        .await
+        .unwrap();
+    assert_eq!(email, "pat@example.org");
+
+    // An existing identity signing in with someone else's invite: refused.
+    let w2 = workspace(&srv, &owner, &[]).await;
+    let theirs = invite_for(&srv, &owner, w2.id, "quinn@example.org").await;
+    let (code, _) = sign_in(&srv, Some(&theirs.link)).await.unwrap_err();
+    assert_eq!(code, "invite_email_mismatch");
+    let member: bool = server::sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2)",
+    )
+    .bind(w2.id)
+    .bind(id)
+    .fetch_one(srv.pool())
+    .await
+    .unwrap();
+    assert!(!member);
 }
 
 #[tokio::test(flavor = "multi_thread")]

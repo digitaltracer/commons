@@ -452,9 +452,9 @@ async fn an_invite_link_signs_up_or_signs_in_and_joins() {
         server::testing::spawn(|c| c.registration = server::config::Registration::Invite).await;
     let alice = register(&srv, "alice").await;
     let ws = workspace(&srv, &alice, &[]).await;
-    let link = |role: &str| {
+    let link = |role: &str, email: &str| {
         let token = alice.token.clone();
-        let role = role.to_string();
+        let body = serde_json::json!({"role": role, "email": email});
         let srv = &srv;
         async move {
             let (s, v) = request(
@@ -462,7 +462,7 @@ async fn an_invite_link_signs_up_or_signs_in_and_joins() {
                 Method::POST,
                 &token,
                 &format!("/workspaces/{}/invites", ws.id),
-                Some(serde_json::json!({"role": role})),
+                Some(body),
             )
             .await;
             assert_eq!(s, 200, "{v}");
@@ -489,7 +489,7 @@ async fn an_invite_link_signs_up_or_signs_in_and_joins() {
     };
 
     // Someone new: the link fills the server and the account joins as it registers.
-    let pasted = link("member").await;
+    let pasted = link("member", "newcomer@example.org").await;
     let (server_url, token) = proto::api::split_invite(&pasted);
     assert_eq!(
         server_url.as_deref(),
@@ -509,18 +509,19 @@ async fn an_invite_link_signs_up_or_signs_in_and_joins() {
 
     // Someone with an account on the server (from another workspace's invite): signing in
     // with a link accepts it.
+    let bob = format!("bob-{}@example.org", Uuid::now_v7().simple());
     let elsewhere = workspace(&srv, &alice, &[]).await;
     let (s, v) = request(
         &srv,
         Method::POST,
         &alice.token,
         &format!("/workspaces/{}/invites", elsewhere.id),
-        Some(serde_json::json!({"role": "member"})),
+        Some(serde_json::json!({"role": "member", "email": bob})),
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    let bob = register_with_invite(&srv, v["link"].as_str().unwrap()).await;
-    let pasted = link("guest").await;
+    register_with_invite(&srv, v["link"].as_str().unwrap(), &bob).await;
+    let pasted = link("guest", &bob).await;
     let id = core
         .add_account(
             &srv.base_url,
@@ -548,11 +549,27 @@ async fn an_invite_link_signs_up_or_signs_in_and_joins() {
         .unwrap_err();
     assert!(format!("{e:#}").contains("invite_used"), "{e:#}");
     assert_eq!(core.accounts().len(), before);
+
+    // A link made for someone else: refused without naming the invited address.
+    let theirs = link("member", "carol@example.org").await;
+    let e = core
+        .add_account(
+            &srv.base_url,
+            "mallory@example.org",
+            "correct horse battery",
+            Some("Mallory"),
+            Some(&proto::api::split_invite(&theirs).1),
+        )
+        .await
+        .unwrap_err();
+    let e = format!("{e:#}");
+    assert!(e.contains("invite_email_mismatch"), "{e}");
+    assert!(!e.contains("carol"), "{e}");
+    assert_eq!(core.accounts().len(), before);
 }
 
-/// Registers through an invite link over HTTP and returns the email.
-async fn register_with_invite(srv: &server::testing::TestServer, link: &str) -> String {
-    let email = format!("bob-{}@example.org", Uuid::now_v7().simple());
+/// Registers `email` through an invite link over HTTP.
+async fn register_with_invite(srv: &server::testing::TestServer, link: &str, email: &str) {
     let (s, v) = {
         let resp = reqwest::Client::new()
             .post(format!("{}/v1/auth/register", srv.base_url))
@@ -566,7 +583,6 @@ async fn register_with_invite(srv: &server::testing::TestServer, link: &str) -> 
         (resp.status().as_u16(), resp.text().await.unwrap())
     };
     assert_eq!(s, 200, "{v}");
-    email
 }
 
 /// A keychain whose reads fail, as when access to it is refused.

@@ -110,7 +110,7 @@ async fn a_pasted_invite_goes_through_to_the_new_account() {
         &srv,
         Some(&owner.token),
         &format!("/workspaces/{}/invites", ws.id),
-        serde_json::json!({"role": "member"}),
+        serde_json::json!({"role": "member", "email": "Ada@Example.org"}),
     )
     .await;
     let dir = tempfile::tempdir().unwrap();

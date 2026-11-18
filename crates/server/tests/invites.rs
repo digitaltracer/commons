@@ -1,5 +1,5 @@
-//! Invite links: who may create them, what registration needs in invite mode, and joining
-//! with one, as a new or an existing account.
+//! Invite links: who may create them, what registration needs in invite mode, joining with
+//! one as a new or an existing account, and the one email address each is for.
 mod common;
 
 use common::*;
@@ -30,13 +30,19 @@ async fn try_register(
     .await
 }
 
-async fn invite(srv: &TestServer, by: &Person, ws: uuid::Uuid, role: &str) -> InviteCreated {
+async fn invite(
+    srv: &TestServer,
+    by: &Person,
+    ws: uuid::Uuid,
+    role: &str,
+    email: &str,
+) -> InviteCreated {
     let v = ok(
         srv,
         Method::POST,
         by,
         &format!("/workspaces/{ws}/invites"),
-        Some(serde_json::json!({"role": role})),
+        Some(serde_json::json!({"role": role, "email": email})),
     )
     .await;
     serde_json::from_value(v).unwrap()
@@ -74,7 +80,7 @@ async fn only_valid_invites_register() {
     let w = workspace(&srv, &owner, &[]).await;
 
     // Valid, given as the whole link: the account joins the workspace with the invite's role.
-    let good = invite(&srv, &owner, w.id, "member").await;
+    let good = invite(&srv, &owner, w.id, "member", "new@example.org").await;
     assert!(
         good.link == format!("{}/invite#{}", srv.state.config.public_url, good.token),
         "{}",
@@ -104,7 +110,7 @@ async fn only_valid_invites_register() {
     assert_eq!((s, v["error"].as_str()), (403, Some("invite_used")), "{v}");
 
     // Wrong secret for a real invite id.
-    let other = invite(&srv, &owner, w.id, "member").await;
+    let other = invite(&srv, &owner, w.id, "member", "forged@example.org").await;
     let (id, _) = other.token.split_once('.').unwrap();
     let forged = format!("{id}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     let (s, v) = try_register(&srv, "forged@example.org", Some(&forged)).await;
@@ -131,7 +137,7 @@ async fn only_valid_invites_register() {
     );
 
     // Expired.
-    let old = invite(&srv, &owner, w.id, "member").await;
+    let old = invite(&srv, &owner, w.id, "member", "late@example.org").await;
     server::sqlx::query(
         "UPDATE invites SET expires_at = now() - interval '1 minute' WHERE id = $1",
     )
@@ -192,10 +198,10 @@ async fn only_owners_and_admins_create_invites() {
         Some(serde_json::json!({"role": "admin"})),
     )
     .await;
-    invite(&srv, &owner, w.id, "member").await;
-    invite(&srv, &admin, w.id, "guest").await;
+    invite(&srv, &owner, w.id, "member", "a@example.org").await;
+    invite(&srv, &admin, w.id, "guest", "b@example.org").await;
     let path = format!("/workspaces/{}/invites", w.id);
-    let body = serde_json::json!({"role": "member"});
+    let body = serde_json::json!({"role": "member", "email": "c@example.org"});
     let (s, _) = call(&srv, Method::POST, Some(&member.token), &path, Some(body)).await;
     assert_eq!(s, 403);
     let (s, _) = call(&srv, Method::GET, Some(&member.token), &path, None).await;
@@ -205,7 +211,7 @@ async fn only_owners_and_admins_create_invites() {
         Method::POST,
         Some(&owner.token),
         &path,
-        Some(serde_json::json!({"role": "admin"})),
+        Some(serde_json::json!({"role": "admin", "email": "c@example.org"})),
     )
     .await;
     assert_eq!(s, 400, "invites grant member or guest only");
@@ -216,7 +222,7 @@ async fn a_guest_invite_grants_the_guest_role() {
     let srv = spawn_invite_mode().await;
     let owner = register(&srv, "owner").await;
     let w = workspace(&srv, &owner, &[]).await;
-    let inv = invite(&srv, &owner, w.id, "guest").await;
+    let inv = invite(&srv, &owner, w.id, "guest", "guest@example.org").await;
     assert_eq!(inv.invite.role, proto::model::Role::Guest);
     let (s, v) = try_register(&srv, "guest@example.org", Some(&inv.token)).await;
     assert_eq!(s, 200, "{v}");
@@ -231,10 +237,12 @@ async fn an_existing_user_accepts_an_invite() {
     let srv = spawn_invite_mode().await;
     let owner = register(&srv, "owner").await;
     let w = workspace(&srv, &owner, &[]).await;
-    let inv = invite(&srv, &owner, w.id, "member").await;
+    let inv = invite(&srv, &owner, w.id, "member", "bob@example.org").await;
+    // A second invite to the same address while the first is open is allowed.
+    let again = invite(&srv, &owner, w.id, "member", "bob@example.org").await;
     // Bob already has an account on this server, from another workspace's invite.
     let w2 = workspace(&srv, &owner, &[]).await;
-    let first = invite(&srv, &owner, w2.id, "member").await;
+    let first = invite(&srv, &owner, w2.id, "member", "bob@example.org").await;
     let (s, v) = try_register(&srv, "bob@example.org", Some(&first.token)).await;
     assert_eq!(s, 200, "{v}");
     let bob = Person {
@@ -275,8 +283,23 @@ async fn an_existing_user_accepts_an_invite() {
         "{page}"
     );
 
-    // Already a member: refused, and the invite stays unused.
-    let again = invite(&srv, &owner, w.id, "member").await;
+    // Inviting a member again is refused, in any case of the address.
+    let (s, v) = call(
+        &srv,
+        Method::POST,
+        Some(&owner.token),
+        &format!("/workspaces/{}/invites", w.id),
+        Some(serde_json::json!({"role": "member", "email": " Bob@Example.org"})),
+    )
+    .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("already_member")),
+        "{v}"
+    );
+
+    // An invite made before Bob joined: accepting it as a member is refused, and it stays
+    // unused.
     let (s, _) = call(
         &srv,
         Method::POST,
@@ -326,7 +349,7 @@ async fn a_refused_invite_costs_no_password_hash() {
             .load(std::sync::atomic::Ordering::Relaxed)
     };
     let before = hashes();
-    let real = invite(&srv, &owner, w.id, "member").await;
+    let real = invite(&srv, &owner, w.id, "member", "real@example.org").await;
     let (id, _) = real.token.split_once('.').unwrap();
     for junk in [
         "junk".to_string(),
@@ -338,6 +361,8 @@ async fn a_refused_invite_costs_no_password_hash() {
     }
     let (s, _) = try_register(&srv, "nobody@example.org", None).await;
     assert_eq!(s, 403, "no invite, not the first account");
+    let (s, v) = try_register(&srv, "someone-else@example.org", Some(&real.token)).await;
+    assert_eq!(v["error"], "invite_email_mismatch", "{s} {v}");
     assert_eq!(hashes(), before, "refused before hashing");
     let (s, v) = try_register(&srv, "real@example.org", Some(&real.token)).await;
     assert_eq!(s, 200, "{v}");
@@ -349,7 +374,7 @@ async fn an_invite_from_a_demoted_admin_is_refused() {
     let srv = spawn_invite_mode().await;
     let owner = register(&srv, "owner").await;
     let w = workspace(&srv, &owner, &[]).await;
-    let admin_inv = invite(&srv, &owner, w.id, "member").await;
+    let admin_inv = invite(&srv, &owner, w.id, "member", "ada@example.org").await;
     let (s, v) = try_register(&srv, "ada@example.org", Some(&admin_inv.token)).await;
     assert_eq!(s, 200, "{v}");
     let ada = Person {
@@ -366,7 +391,7 @@ async fn an_invite_from_a_demoted_admin_is_refused() {
         Some(serde_json::json!({"role": "admin"})),
     )
     .await;
-    let from_ada = invite(&srv, &ada, w.id, "member").await;
+    let from_ada = invite(&srv, &ada, w.id, "member", "late@example.org").await;
 
     ok(
         &srv,
@@ -389,11 +414,169 @@ async fn links_of_the_older_form_and_bare_tokens_still_work() {
     let srv = spawn_invite_mode().await;
     let owner = register(&srv, "owner").await;
     let w = workspace(&srv, &owner, &[]).await;
-    let old = invite(&srv, &owner, w.id, "member").await;
+    let old = invite(&srv, &owner, w.id, "member", "old@example.org").await;
     let old_link = old.link.replace("/invite#", "/invite/");
     let (s, v) = try_register(&srv, "old@example.org", Some(&old_link)).await;
     assert_eq!(s, 200, "{v}");
-    let bare = invite(&srv, &owner, w.id, "member").await;
+    let bare = invite(&srv, &owner, w.id, "member", "bare@example.org").await;
     let (s, v) = try_register(&srv, "bare@example.org", Some(&bare.token)).await;
     assert_eq!(s, 200, "{v}");
+}
+
+async fn users_named(srv: &TestServer, email: &str) -> i64 {
+    server::sqlx::query_scalar("SELECT count(*) FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_one(srv.pool())
+        .await
+        .unwrap()
+}
+
+async fn used(srv: &TestServer, inv: &InviteCreated) -> bool {
+    server::sqlx::query_scalar("SELECT used_at IS NOT NULL FROM invites WHERE id = $1")
+        .bind(inv.invite.id)
+        .fetch_one(srv.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invite_needs_a_valid_email() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let path = format!("/workspaces/{}/invites", w.id);
+    let (s, v) = call(
+        &srv,
+        Method::POST,
+        Some(&owner.token),
+        &path,
+        Some(serde_json::json!({"role": "member"})),
+    )
+    .await;
+    assert_eq!(s, 422, "no email: {v}");
+    for bad in ["", "  ", "not-an-email"] {
+        let (s, v) = call(
+            &srv,
+            Method::POST,
+            Some(&owner.token),
+            &path,
+            Some(serde_json::json!({"role": "member", "email": bad})),
+        )
+        .await;
+        assert_eq!(s, 400, "{bad:?}: {v}");
+    }
+    let inv = invite(&srv, &owner, w.id, "member", "  Pat@Example.ORG ").await;
+    assert_eq!(inv.invite.email.as_deref(), Some("pat@example.org"));
+    let list = ok(&srv, Method::GET, &owner, &path, None).await;
+    assert_eq!(list["invites"][0]["email"], "pat@example.org");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registering_needs_the_invited_email() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let inv = invite(&srv, &owner, w.id, "member", "pat@example.org").await;
+
+    let (s, v) = try_register(&srv, "mallory@example.org", Some(&inv.link)).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (403, Some("invite_email_mismatch")),
+        "{v}"
+    );
+    assert!(
+        !v.to_string().contains("pat@"),
+        "the address stays hidden: {v}"
+    );
+    assert_eq!(users_named(&srv, "mallory@example.org").await, 0);
+    assert!(!used(&srv, &inv).await);
+
+    let (s, v) = try_register(&srv, "  PAT@Example.org ", Some(&inv.link)).await;
+    assert_eq!(s, 200, "case and spaces don't matter: {v}");
+    assert_eq!(v["user"]["email"], "pat@example.org");
+    assert_eq!(
+        role_of(&srv, w.id, "pat@example.org").await.as_deref(),
+        Some("member")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_user_accepts_only_their_own_invite() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let owner = register(&srv, "owner").await;
+    let carol = register(&srv, "carol").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let for_dave = invite(&srv, &owner, w.id, "member", "dave@example.org").await;
+    let (s, v) = call(
+        &srv,
+        Method::POST,
+        Some(&carol.token),
+        "/invites/accept",
+        Some(serde_json::json!({"token": for_dave.link})),
+    )
+    .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (403, Some("invite_email_mismatch")),
+        "{v}"
+    );
+    assert_eq!(role_of(&srv, w.id, &carol.email).await, None);
+    assert!(!used(&srv, &for_dave).await);
+
+    let for_carol = invite(&srv, &owner, w.id, "member", &carol.email.to_uppercase()).await;
+    let (s, v) = call(
+        &srv,
+        Method::POST,
+        Some(&carol.token),
+        "/invites/accept",
+        Some(serde_json::json!({"token": for_carol.link})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        role_of(&srv, w.id, &carol.email).await.as_deref(),
+        Some("member")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invite_made_before_invites_had_an_email_is_not_valid() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let owner = register(&srv, "owner").await;
+    let carol = register(&srv, "carol").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let old = invite(&srv, &owner, w.id, "member", "pat@example.org").await;
+    server::sqlx::query("UPDATE invites SET email = NULL WHERE id = $1")
+        .bind(old.invite.id)
+        .execute(srv.pool())
+        .await
+        .unwrap();
+    let (s, v) = try_register(&srv, "pat@example.org", Some(&old.token)).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (403, Some("invite_invalid")),
+        "{v}"
+    );
+    let (s, v) = call(
+        &srv,
+        Method::POST,
+        Some(&carol.token),
+        "/invites/accept",
+        Some(serde_json::json!({"token": old.token})),
+    )
+    .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (403, Some("invite_invalid")),
+        "{v}"
+    );
+    let list = ok(
+        &srv,
+        Method::GET,
+        &owner,
+        &format!("/workspaces/{}/invites", w.id),
+        None,
+    )
+    .await;
+    assert!(list["invites"][0]["email"].is_null(), "{list}");
 }
