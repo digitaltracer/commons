@@ -123,3 +123,35 @@ async fn a_batch_with_nothing_queued_behind_it_is_delivered() {
     let frames = s.collect(Duration::from_secs(1)).await;
     assert_eq!(markers(&frames), vec!["queued"]);
 }
+
+#[tokio::test]
+async fn a_removal_queued_behind_typing_still_withholds_the_batch() {
+    let (srv, bob, ws, secret, mut s, h) = setup().await;
+    let general: Uuid = server::sqlx::query_scalar(
+        "SELECT id FROM conversations WHERE workspace_id = $1 AND name = 'general'",
+    )
+    .bind(ws)
+    .fetch_one(srv.pool())
+    .await
+    .unwrap();
+    srv.state
+        .hub
+        .batch(batch(ws, h, vec![message(h + 1, secret)]));
+    srv.state.hub.ephemeral(Ephemeral {
+        workspace_id: ws,
+        frame: proto::events::ServerFrame::Typing {
+            workspace_id: ws,
+            conversation_id: general,
+            user_id: Uuid::now_v7(),
+        },
+    });
+    srv.state
+        .hub
+        .batch(batch(ws, h + 1, vec![removal(h + 2, secret, bob.id)]));
+    let frames = s.collect(Duration::from_secs(1)).await;
+    assert_eq!(
+        markers(&frames),
+        vec!["removal", "typing"],
+        "the removal behind the typing wakeup withholds the message; typing follows"
+    );
+}

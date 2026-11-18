@@ -1,6 +1,6 @@
 //! One WebSocket per client. It only delivers; HTTPS replay is the source of truth.
 use crate::sqlx;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 
 use axum::extract::State;
@@ -19,6 +19,8 @@ use crate::{AppState, sync};
 const PAGE: i64 = 200;
 /// Queued feed batches filtered together, at most.
 const CHAIN: usize = 8;
+/// Queued wakeups looked at while chaining, at most.
+const LOOKAHEAD: usize = 4 * CHAIN;
 /// A connection relays at most one typing frame per conversation in this period.
 const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -154,14 +156,14 @@ impl Session {
     }
 
     /// Delivers a feed batch: filtered in memory when it continues this socket's cursor,
-    /// otherwise the socket catches up through its own replay. Batches for the same workspace
-    /// already queued behind it are filtered with it; the first other wakeup is kept in
-    /// `pending` so wakeups stay in order.
+    /// otherwise the socket catches up through its own replay. Linked batches for the same
+    /// workspace already queued behind it are filtered with it; other wakeups found on the
+    /// way are set aside in `pending`, in order, and handled next.
     async fn batch(
         &mut self,
         b: std::sync::Arc<crate::feed::Batch>,
         rx: &mut tokio::sync::mpsc::Receiver<Wakeup>,
-        pending: &mut Option<Wakeup>,
+        pending: &mut VecDeque<Wakeup>,
     ) -> Result<(), Stop> {
         let Some(&cursor) = self.workspaces.get(&b.workspace_id) else {
             return Ok(());
@@ -181,7 +183,10 @@ impl Session {
             return self.drain_workspace(b.workspace_id).await;
         };
         let mut chain = vec![b];
-        while chain.len() < CHAIN && pending.is_none() {
+        for _ in 0..LOOKAHEAD {
+            if chain.len() >= CHAIN {
+                break;
+            }
             match rx.try_recv() {
                 Ok(Wakeup::Batch(next))
                     if next.workspace_id == chain[0].workspace_id
@@ -189,7 +194,7 @@ impl Session {
                 {
                     chain.push(next)
                 }
-                Ok(other) => *pending = Some(other),
+                Ok(other) => pending.push_back(other),
                 Err(_) => break,
             }
         }
@@ -221,7 +226,7 @@ impl Session {
         &mut self,
         w: Wakeup,
         rx: &mut tokio::sync::mpsc::Receiver<Wakeup>,
-        pending: &mut Option<Wakeup>,
+        pending: &mut VecDeque<Wakeup>,
     ) -> Result<(), Stop> {
         match w {
             Wakeup::Batch(b) => self.batch(b, rx, pending).await,
@@ -346,7 +351,7 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         typing_sent: HashMap::new(),
     };
     let mut repair = tokio::time::interval(state.config.repair_interval);
-    let mut pending: Option<Wakeup> = None;
+    let mut pending: VecDeque<Wakeup> = VecDeque::new();
     let mut ws_ids: Vec<Uuid> = vec![];
     let result: Result<(), Stop> = async {
         // The hello's workspaces are claims: register and announce only those that pass
@@ -362,8 +367,8 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         loop {
             let mut before: Vec<Uuid> = session.workspaces.keys().copied().collect();
             before.sort();
-            // A wakeup set aside while chaining batches goes first, before waiting again.
-            if let Some(w) = pending.take() {
+            // Wakeups set aside while chaining batches go first, in order, before waiting again.
+            if let Some(w) = pending.pop_front() {
                 session.wakeup(w, &mut reg.rx, &mut pending).await?;
             } else {
                 tokio::select! {
