@@ -7,6 +7,7 @@
 pub mod account;
 pub mod apply;
 pub mod core;
+pub mod oidc;
 pub mod platform;
 pub mod store;
 pub mod transport;

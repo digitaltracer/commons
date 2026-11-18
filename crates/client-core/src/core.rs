@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use proto::api::{AcceptInvite, LoginRequest, RegisterRequest, SessionResponse};
+use proto::api::{
+    AcceptInvite, IdentityList, LoginRequest, Meta, OidcExchanged, RegisterRequest, SessionResponse,
+};
 use proto::view::{AppEvent, SidebarView};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -34,6 +36,7 @@ pub struct Core {
     sink: AppSink,
     runtime: Option<tokio::runtime::Handle>,
     sidebar_pending: AtomicBool,
+    oidc_cancel: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 /// Sidebar view models are rebuilt at most this often, however fast the cache changes.
@@ -58,6 +61,7 @@ impl Core {
             sink,
             runtime: tokio::runtime::Handle::try_current().ok(),
             sidebar_pending: AtomicBool::new(false),
+            oidc_cancel: Default::default(),
         });
         for saved in core.load_saved()? {
             let token = core.secrets.get(saved.id).unwrap_or(None);
@@ -255,6 +259,16 @@ impl Core {
                 return Err(e.into());
             }
         }
+        self.adopt(server_url, session).await
+    }
+
+    /// Starts a new account for a fresh session, replacing this device's older account for
+    /// the same user on the same server.
+    async fn adopt(
+        self: &Arc<Self>,
+        server_url: String,
+        session: SessionResponse,
+    ) -> anyhow::Result<Uuid> {
         let existing = self
             .accounts
             .read()
@@ -321,6 +335,155 @@ impl Core {
         self.secrets.set(account_id, &session.token)?;
         account.resume_session(session.token);
         Ok(())
+    }
+
+    /// What a server offers before signing in, such as its OIDC provider.
+    pub async fn server_meta(&self, server_url: &str) -> anyhow::Result<Meta> {
+        let transport = (self.transports)(server_url.trim().trim_end_matches('/'));
+        Ok(call(
+            &*transport,
+            Method::Get,
+            "/meta",
+            &[],
+            None::<&()>,
+            None,
+            None,
+        )
+        .await?)
+    }
+
+    /// A fresh cancel signal for the one provider flow that may run at a time; starting a
+    /// flow cancels any earlier one still waiting for the browser.
+    fn oidc_signal(&self) -> Arc<tokio::sync::Notify> {
+        let n = Arc::new(tokio::sync::Notify::new());
+        if let Ok(mut slot) = self.oidc_cancel.lock()
+            && let Some(old) = slot.replace(n.clone())
+        {
+            old.notify_one();
+        }
+        n
+    }
+
+    /// Stops a provider flow that is waiting for the browser.
+    pub fn cancel_oidc(&self) {
+        if let Ok(mut slot) = self.oidc_cancel.lock()
+            && let Some(n) = slot.take()
+        {
+            n.notify_one();
+        }
+    }
+
+    async fn run_oidc(
+        &self,
+        server_url: &str,
+        token: Option<&str>,
+        invite: Option<String>,
+        link: bool,
+        open: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<OidcExchanged> {
+        let transport = (self.transports)(server_url);
+        let cancel = self.oidc_signal();
+        let r = crate::oidc::run(
+            &*transport,
+            token,
+            invite,
+            link,
+            open,
+            &cancel,
+            crate::oidc::TIMEOUT,
+        )
+        .await;
+        if let Ok(mut slot) = self.oidc_cancel.lock()
+            && slot.as_ref().is_some_and(|n| Arc::ptr_eq(n, &cancel))
+        {
+            slot.take();
+        }
+        r
+    }
+
+    /// Signs in (or creates an account) through the server's OIDC provider in the system
+    /// browser, which `open` shows. An invite joins its workspace. Nothing is stored unless
+    /// the whole flow succeeds.
+    pub async fn add_account_oidc(
+        self: &Arc<Self>,
+        server_url: &str,
+        invite: Option<&str>,
+        open: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Uuid> {
+        let server_url = server_url.trim().trim_end_matches('/').to_string();
+        let invite = invite.filter(|i| !i.trim().is_empty()).map(str::to_string);
+        match self
+            .run_oidc(&server_url, None, invite, false, open)
+            .await?
+        {
+            OidcExchanged::Session { session } => self.adopt(server_url, session).await,
+            OidcExchanged::Linked { .. } => {
+                anyhow::bail!("the server linked instead of signing in")
+            }
+        }
+    }
+
+    /// Signs an account whose session ended back in through the provider, keeping its cache
+    /// and outbox.
+    pub async fn sign_in_again_oidc(
+        &self,
+        account_id: Uuid,
+        open: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let account = self.account(account_id)?;
+        let session = match self
+            .run_oidc(&account.server_url, None, None, false, open)
+            .await?
+        {
+            OidcExchanged::Session { session } => session,
+            OidcExchanged::Linked { .. } => {
+                anyhow::bail!("the server linked instead of signing in")
+            }
+        };
+        if session.user.id != account.user.id {
+            // Not this account: end the session it made rather than keep it.
+            let transport = (self.transports)(&account.server_url);
+            let _ = call::<serde_json::Value>(
+                &*transport,
+                Method::Post,
+                "/auth/logout",
+                &[],
+                None::<&()>,
+                Some(&session.token),
+                None,
+            )
+            .await;
+            anyhow::bail!(
+                "That sign-in belongs to {}, not {}.",
+                session.user.email,
+                account.user.email
+            );
+        }
+        self.secrets.set(account_id, &session.token)?;
+        account.resume_session(session.token);
+        Ok(())
+    }
+
+    /// Links the server's OIDC provider to a signed-in account, through the browser.
+    pub async fn link_oidc(
+        &self,
+        account_id: Uuid,
+        open: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<IdentityList> {
+        let account = self.account(account_id)?;
+        let token = self
+            .secrets
+            .get(account_id)?
+            .ok_or_else(|| anyhow::anyhow!("This account is signed out. Sign in first."))?;
+        match self
+            .run_oidc(&account.server_url, Some(&token), None, true, open)
+            .await?
+        {
+            OidcExchanged::Linked { identities } => Ok(identities),
+            OidcExchanged::Session { .. } => {
+                anyhow::bail!("the server signed in instead of linking")
+            }
+        }
     }
 
     /// Hosts an account built elsewhere (the M0 spike's local accounts). Not saved.

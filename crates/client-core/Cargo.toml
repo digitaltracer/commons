@@ -25,6 +25,10 @@ tokio-util = { version = "0.7", features = ["io"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "query", "http2"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 [dev-dependencies]
