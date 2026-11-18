@@ -71,6 +71,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         ui_log,
         crate::spike::spike_config,
         crate::spike::spike_report,
+        crate::updater::update_ready,
+        crate::updater::restart_to_update,
     ]
 }
 

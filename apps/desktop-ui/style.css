@@ -154,6 +154,7 @@ a { color: var(--accent); }
 .emptyst p { margin: 0; font-size: 13px; color: var(--text2); line-height: 1.45; }
 .bbtn { height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--warnline); background: var(--win); color: var(--text); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 .notice { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 50; max-width: 520px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--warn); color: var(--warntext); border: 1px solid var(--warnline); border-radius: 8px; font-size: 13px; }
+.update { position: fixed; right: 16px; top: 16px; z-index: 50; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; background: var(--pop); color: var(--text); border: 1px solid var(--line2); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.12); font-size: 13px; }
 .draft { margin: 8px 20px 0; padding: 8px 12px; border: 1px solid var(--warnline); background: var(--warn); color: var(--warntext); border-radius: 8px; font-size: 13px; }
 .draft p { margin: 0 0 4px; }
 

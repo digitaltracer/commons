@@ -34,6 +34,7 @@ pub fn App() -> impl IntoView {
     let c = Ctx::new();
     provide_context(c);
     let loaded = RwSignal::new(false);
+    let update = RwSignal::new(None::<String>);
 
     let load_presence = move |s: &SidebarView| {
         for a in &s.accounts {
@@ -72,6 +73,7 @@ pub fn App() -> impl IntoView {
                     p.insert(account_id, online.into_iter().collect::<HashSet<_>>());
                 }),
                 AppEvent::Error { message } => ipc::warn(message),
+                AppEvent::UpdateReady { version } => update.set(Some(version)),
             },
         )
         .await;
@@ -80,6 +82,9 @@ pub fn App() -> impl IntoView {
             c.sidebar.set(s);
         }
         loaded.set(true);
+        if let Ok(Some(v)) = ipc::invoke::<Option<String>>("update_ready", json!({})).await {
+            update.set(Some(v));
+        }
         if let Ok(cfg) = ipc::invoke::<SpikeConfig>("spike_config", json!({})).await
             && let (true, Some(a), Some(conv)) = (cfg.enabled, cfg.account_id, cfg.conversation_id)
         {
@@ -159,7 +164,26 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    let restarting = RwSignal::new(false);
+    let restart = move |_| {
+        restarting.set(true);
+        leptos::task::spawn_local(async move {
+            if let Err(e) = ipc::invoke::<()>("restart_to_update", json!({})).await {
+                restarting.set(false);
+                c.notice
+                    .set(Some(format!("The update could not be installed: {e}")));
+            }
+        });
+    };
+
     view! {
+        {move || update.get().map(|v| view! {
+            <div class="update" role="status">
+                <span>{format!("Update available: Commons {v}")}</span>
+                <button class="btn primary" disabled=move || restarting.get() on:click=restart>"Restart to update"</button>
+                <button class="btn" disabled=move || restarting.get() on:click=move |_| update.set(None)>"Later"</button>
+            </div>
+        })}
         {move || c.notice.get().map(|n| view! {
             <div class="notice" role="status">
                 <span>{n}</span>

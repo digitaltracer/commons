@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Commons",
-  "version": "0.1.0",
   "identifier": "org.commons.desktop",
   "build": {
     "frontendDist": "../desktop-ui/dist",
@@ -49,6 +48,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "hardenedRuntime": true
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "PENDING",
+      "endpoints": [
+        "https://github.com/digitaltracer/commons/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
+    }
   }
 }

@@ -5,6 +5,7 @@
 mod commands;
 mod files;
 mod spike;
+mod updater;
 
 use std::sync::{Arc, Mutex};
 
@@ -123,6 +124,7 @@ fn main() {
                 app_channels: channels,
                 spike,
             });
+            updater::start(app.handle(), !spike_mode)?;
             Ok(())
         })
         .invoke_handler(commands::handler())

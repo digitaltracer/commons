@@ -180,4 +180,8 @@ pub enum AppEvent {
     Error {
         message: String,
     },
+    /// The shell downloaded this version; restarting installs it.
+    UpdateReady {
+        version: String,
+    },
 }
