@@ -182,6 +182,17 @@ pub async fn append(
     Ok(rows.iter().map(|r| r.get::<i64, _>(0)).collect())
 }
 
+/// Serializes membership changes in a workspace: every path that changes
+/// `access_intervals` or `workspace_members` takes this first, before reading the state it
+/// changes. An advisory lock, not the workspace row, which `append` locks last.
+pub async fn lock_workspace(conn: &mut PgConnection, workspace_id: Uuid) -> ApiResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(workspace_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SinceQuery {
     pub since: Option<i64>,

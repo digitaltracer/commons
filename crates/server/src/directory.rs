@@ -232,6 +232,7 @@ pub async fn add_member(
     Json(req): Json<AddWorkspaceMember>,
 ) -> ApiResult<Json<Member>> {
     let mut tx = state.pool.begin().await?;
+    sync::lock_workspace(&mut tx, workspace_id).await?;
     let mine = require_role(
         &mut tx,
         workspace_id,
@@ -285,6 +286,7 @@ pub async fn set_role(
     Json(req): Json<SetRole>,
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
+    sync::lock_workspace(&mut tx, workspace_id).await?;
     let mine = require_role(
         &mut tx,
         workspace_id,
@@ -344,6 +346,7 @@ pub async fn remove_member(
     Path((workspace_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
+    sync::lock_workspace(&mut tx, workspace_id).await?;
     let mine = sync::active_role(&mut tx, workspace_id, auth.user_id)
         .await?
         .ok_or(ApiError::Forbidden)?;

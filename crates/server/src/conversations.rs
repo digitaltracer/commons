@@ -304,6 +304,7 @@ pub async fn create_channel(
     }
     let name = check_channel_name(&req.name)?;
     let mut tx = state.pool.begin().await?;
+    sync::lock_workspace(&mut tx, workspace_id).await?;
     if role_in(&mut tx, workspace_id, auth.user_id).await? == Role::Guest {
         return Err(ApiError::Forbidden);
     }
@@ -387,6 +388,8 @@ pub async fn join(
     Path(conversation_id): Path<Uuid>,
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
+    let ws = workspace_of(&mut tx, conversation_id).await?;
+    sync::lock_workspace(&mut tx, ws).await?;
     let c = load(&mut tx, conversation_id).await?;
     let role = role_in(&mut tx, c.workspace_id, auth.user_id).await?;
     if c.kind != ConversationKind::Public || role == Role::Guest {
@@ -408,6 +411,7 @@ pub async fn leave(
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
     let ws = workspace_of(&mut tx, conversation_id).await?;
+    sync::lock_workspace(&mut tx, ws).await?;
     if let Some(e) = revoke(
         &mut tx,
         conversation_id,
@@ -491,6 +495,8 @@ pub async fn add_member(
     Json(req): Json<AddConversationMember>,
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
+    let ws = workspace_of(&mut tx, conversation_id).await?;
+    sync::lock_workspace(&mut tx, ws).await?;
     let c = load(&mut tx, conversation_id).await?;
     if c.kind == ConversationKind::Dm || !can_read_now(&mut tx, c.id, auth.user_id).await {
         return Err(ApiError::Forbidden);
@@ -536,6 +542,8 @@ pub async fn remove_member(
     Path((conversation_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<axum::http::StatusCode> {
     let mut tx = state.pool.begin().await?;
+    let ws = workspace_of(&mut tx, conversation_id).await?;
+    sync::lock_workspace(&mut tx, ws).await?;
     let c = load(&mut tx, conversation_id).await?;
     let role = role_in(&mut tx, c.workspace_id, auth.user_id).await?;
     let is_dm = matches!(c.kind, ConversationKind::Dm | ConversationKind::GroupDm);
@@ -569,6 +577,7 @@ pub async fn open_dm(
         ));
     }
     let mut tx = state.pool.begin().await?;
+    sync::lock_workspace(&mut tx, workspace_id).await?;
     for u in &ids {
         role_in(&mut tx, workspace_id, *u)
             .await
