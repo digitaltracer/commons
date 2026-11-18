@@ -9,7 +9,7 @@ mod spike;
 use std::sync::{Arc, Mutex};
 
 use client_core::Core;
-use client_core::platform::{KeyringSecrets, Notifier};
+use client_core::platform::{FileSecrets, KeyringSecrets, Notifier, SecretStore};
 use client_core::transport::{HttpTransport, Transport};
 use proto::view::AppEvent;
 use tauri::Manager;
@@ -38,6 +38,26 @@ impl Notifier for OsNotifier {
             tracing::warn!(error = %e, "notification failed");
         }
     }
+}
+
+/// Where session tokens live: the keychain, except in debug builds, whose ad-hoc signature
+/// changes per build so the keychain asks for a password on every launch. Override with
+/// `COMMONS_SECRETS=keychain|file`.
+fn secret_store(data_dir: &std::path::Path) -> anyhow::Result<Arc<dyn SecretStore>> {
+    let file = match std::env::var("COMMONS_SECRETS").ok().as_deref() {
+        None | Some("") => cfg!(debug_assertions),
+        Some("file") => true,
+        Some("keychain") => false,
+        Some(other) => anyhow::bail!("COMMONS_SECRETS must be keychain or file, not {other:?}"),
+    };
+    Ok(if file {
+        let store = FileSecrets::new(data_dir.join("secrets.json"));
+        tracing::info!(path = %store.path().display(), "session tokens: file store");
+        Arc::new(store)
+    } else {
+        tracing::info!("session tokens: OS keychain");
+        Arc::new(KeyringSecrets::new("org.commons.desktop"))
+    })
 }
 
 fn main() {
@@ -83,7 +103,7 @@ fn main() {
             let _guard = handle.enter();
             let core = Core::open(
                 &data_dir,
-                Arc::new(KeyringSecrets::new("org.commons.desktop")),
+                secret_store(&data_dir)?,
                 notifier,
                 Arc::new(|url: &str| Arc::new(HttpTransport::new(url)) as Arc<dyn Transport>),
                 sink,
