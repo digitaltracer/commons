@@ -20,7 +20,9 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
 async fn admin(args: Vec<String>) -> anyhow::Result<std::process::ExitCode> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,commons::admin=info".into()),
+        )
         .init();
     if args.is_empty() || args[0] == "help" || args[0] == "--help" {
         println!("{}", server::admin::USAGE);
