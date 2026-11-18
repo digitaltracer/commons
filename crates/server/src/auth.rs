@@ -238,13 +238,16 @@ async fn create_session(conn: &mut sqlx::PgConnection, user_id: Uuid) -> ApiResu
 #[utoipa::path(post, path = "/v1/auth/register", request_body = RegisterRequest,
     responses(
         (status = 200, body = SessionResponse),
+        (status = 429),
         (status = 403, description = "registration is closed, or an invite is required, \
             invalid, expired, used or revoked", body = proto::api::ErrorBody),
     ))]
 pub async fn register(
     State(state): State<AppState>,
+    ip: ClientIp,
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
+    ip.check(&state, "register")?;
     let email = normalise_email(&req.email)?;
     if state.config.registration == Registration::Closed {
         return Err(ApiError::Refused(
@@ -257,12 +260,9 @@ pub async fn register(
     if name.is_empty() || name.len() > 80 {
         return Err(ApiError::BadRequest("display name is required".into()));
     }
-    let password = req.password.clone();
-    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))??;
     let id = Uuid::now_v7();
-    // One transaction: the account, its session and, with an invite, its workspace.
+    // One transaction: the account, its session and, with an invite, its workspace. The
+    // invite or first-account rule is checked before the costly hash, under the same locks.
     let mut tx = state.pool.begin().await?;
     let invite = match req.invite.as_deref().filter(|t| !t.trim().is_empty()) {
         Some(raw) => Some(crate::invites::prepare(&mut tx, raw).await?),
@@ -271,6 +271,13 @@ pub async fn register(
     if invite.is_none() && state.config.registration == Registration::Invite {
         check_bootstrap(&mut tx).await?;
     }
+    let password = req.password.clone();
+    state
+        .password_hashes
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))??;
     let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)
          ON CONFLICT (email) DO NOTHING",

@@ -313,3 +313,32 @@ async fn an_invite_link_opened_in_a_browser_explains_itself() {
     assert_eq!(resp.status().as_u16(), 200);
     assert!(resp.text().await.unwrap().contains("Commons app"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_invite_costs_no_password_hash() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let hashes = || {
+        srv.state
+            .password_hashes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let before = hashes();
+    let real = invite(&srv, &owner, w.id, "member").await;
+    let (id, _) = real.token.split_once('.').unwrap();
+    for junk in [
+        "junk".to_string(),
+        format!("{}.x", uuid::Uuid::now_v7().simple()),
+        format!("{id}.wrong-secret"),
+    ] {
+        let (s, v) = try_register(&srv, "j@example.org", Some(&junk)).await;
+        assert_eq!(s, 403, "{v}");
+    }
+    let (s, _) = try_register(&srv, "nobody@example.org", None).await;
+    assert_eq!(s, 403, "no invite, not the first account");
+    assert_eq!(hashes(), before, "refused before hashing");
+    let (s, v) = try_register(&srv, "real@example.org", Some(&real.token)).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(hashes(), before + 1);
+}

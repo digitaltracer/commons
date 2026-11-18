@@ -43,6 +43,8 @@ pub struct Inner {
     pub mailer: Arc<dyn mail::Mailer>,
     pub limiter: auth::Limiter,
     pub ip_limiter: auth::Limiter,
+    /// Passwords hashed for registration since start.
+    pub password_hashes: std::sync::atomic::AtomicU64,
     pub files: Arc<dyn object_store::ObjectStore>,
 }
 
@@ -85,6 +87,7 @@ impl AppState {
             mailer,
             limiter,
             ip_limiter,
+            password_hashes: std::sync::atomic::AtomicU64::new(0),
             files,
         })))
     }

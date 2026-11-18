@@ -84,3 +84,30 @@ async fn one_client_ip_is_limited_across_emails() {
     .await;
     assert_eq!(s, 202);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_is_limited_per_client_ip() {
+    let srv = server::testing::spawn(|c| c.auth_attempts_per_minute = 2).await;
+    let mut statuses = vec![];
+    for i in 0..12 {
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/auth/register", srv.base_url))
+            .header("X-Real-IP", "203.0.113.8")
+            .json(&serde_json::json!({"email": format!("r{i}@example.org"),
+                "password": "correct horse battery", "display_name": "R"}))
+            .send()
+            .await
+            .unwrap();
+        statuses.push(resp.status().as_u16());
+    }
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        10,
+        "{statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 429).count(),
+        2,
+        "{statuses:?}"
+    );
+}
