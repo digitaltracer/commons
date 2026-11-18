@@ -90,6 +90,66 @@ In invite mode, the first account registers without an invite. Create a workspac
 
 Opened in a browser, the link shows a page saying to paste it into the app. The token is shown only when the link is made; the server keeps its hash. Owners and admins list and revoke invites through `GET` and `DELETE /v1/workspaces/{id}/invites`.
 
+## Sign-in with Google (OIDC)
+
+`commonsd` signs people in through any OIDC provider it finds by discovery under an issuer URL. It runs the authorization-code flow with PKCE on the server, so the client secret stays on the server. The app shows **Continue with Google** when the server has it on.
+
+**In Google Cloud Console**, in the project that will own the sign-in:
+1. Under **APIs & Services → OAuth consent screen**, set up the app: its name, a support email, and the scopes `openid`, `email` and `profile`. While the app is in **Testing**, only the test users you list can sign in. Publish it to let any Google account in.
+2. Under **APIs & Services → Credentials**, choose **Create credentials → OAuth client ID**, with the application type **Web application**. It is not **Desktop**, because `commonsd` is the OAuth client, not the app.
+3. Under **Authorized redirect URIs**, add exactly `https://commons.adarshnb.com/v1/auth/oidc/callback`, which is `COMMONS_PUBLIC_URL` followed by `/v1/auth/oidc/callback`. No JavaScript origins are needed.
+4. Copy the client ID and the client secret.
+
+**In the env file** (`deploy/.env`, or `/etc/commons/commonsd.env`):
+
+```sh
+COMMONS_OIDC_ISSUER=https://accounts.google.com
+COMMONS_OIDC_CLIENT_ID=<the client ID, ending in .apps.googleusercontent.com>
+COMMONS_OIDC_CLIENT_SECRET=<the client secret>
+COMMONS_OIDC_NAME=Google
+```
+
+Then restart `commonsd`. OIDC is on only when all four are set; with some set, it stays off and the log says which are missing. `curl -fsS https://commons.adarshnb.com/v1/meta` shows `"oidc":{"name":"Google"}` once it is on. `commonsd` must reach `accounts.google.com` and `oauth2.googleapis.com` over HTTPS.
+
+**How accounts work with it:**
+- The first sign-in with a Google account makes a new Commons account, under the registration mode: `open` lets anyone in, `invite` needs an invite link pasted in the app first (except for the server's very first account), and `closed` refuses.
+- A Google account whose email matches an existing Commons account is **not** joined to it. The person signs in with their password, then links Google in **Settings**. After that, either way signs in to the same account.
+- **Unlink** in Settings works only while the account keeps another way to sign in: a password or another linked identity.
+- An account made through Google has no password. If it needs one, run `reset-password` (below).
+
+Any other OIDC provider works the same way: set its issuer, register the same redirect URI with it, and name it in `COMMONS_OIDC_NAME`.
+
+## Operator commands
+
+`commonsd admin` recovers accounts. It runs on the server, with the server's own env file, and is not reachable over the network. Accounts span every workspace on the server, so workspace owners and admins can't do these from the app.
+
+| Command | What it does |
+|---|---|
+| `list-users` | Every account: email, name, active or deactivated, how it signs in, workspaces and live sessions. |
+| `reset-password <email>` | Prints a one-time reset link, valid for 24 hours, and signs the account out everywhere. Send the link privately. Opened in a browser, it shows a form that sets the new password. It works without SMTP. |
+| `revoke-sessions <email>` | Signs the account out everywhere. Its open sockets close at once. |
+| `deactivate <email>` | Blocks every way of signing in and signs the account out everywhere. Memberships and messages stay. |
+| `reactivate <email>` | Lets a deactivated account sign in again. |
+| `make-owner <email> <workspace>` | Makes the account an owner of the workspace, given by id or exact name, and adds it first if it isn't a member. Use it when a workspace has lost its owners. |
+
+Each command prints what it did and logs a line (target `commons::admin`) on stderr. A failed command exits non-zero.
+
+**Under compose**, the container already has the environment:
+
+```sh
+docker compose -f deploy/compose.yaml exec commonsd commonsd admin list-users
+```
+
+**Under systemd**, run it as the `commons` user with the unit's env file. `systemd-run` reads the file the same way the service does:
+
+```sh
+sudo systemd-run --quiet --pipe --wait --collect \
+  -p User=commons -p EnvironmentFile=/etc/commons/commonsd.env \
+  /usr/local/bin/commonsd admin list-users
+```
+
+Keep `--pipe`. Without it, the output, including a reset link, goes to the journal.
+
 ## Upgrading
 
 Copy the new tree as in step 1. Then, on the server:

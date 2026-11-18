@@ -39,5 +39,15 @@ COMMONS_S3_BUCKET=
 # loopback. nginx connects over loopback here, so leave it empty.
 COMMONS_TRUSTED_PROXIES=
 
+# Sign-in through an OIDC provider, found by discovery under the issuer. On only when all four
+# are set. Register this redirect URI with the provider:
+#   https://commons.adarshnb.com/v1/auth/oidc/callback
+# For Google: issuer https://accounts.google.com, a "Web application" OAuth client.
+COMMONS_OIDC_ISSUER=
+COMMONS_OIDC_CLIENT_ID=
+COMMONS_OIDC_CLIENT_SECRET=
+# The provider's name on the button, as in "Continue with Google".
+COMMONS_OIDC_NAME=
+
 # Log filter (tracing EnvFilter syntax). Logs go to the journal.
 RUST_LOG=info

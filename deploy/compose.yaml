@@ -53,6 +53,10 @@ services:
       COMMONS_USER_QUOTA_BYTES: ${COMMONS_USER_QUOTA_BYTES:-}
       COMMONS_SMTP_URL: ${COMMONS_SMTP_URL:-}
       COMMONS_MAIL_FROM: ${COMMONS_MAIL_FROM:-}
+      COMMONS_OIDC_ISSUER: ${COMMONS_OIDC_ISSUER:-}
+      COMMONS_OIDC_CLIENT_ID: ${COMMONS_OIDC_CLIENT_ID:-}
+      COMMONS_OIDC_CLIENT_SECRET: ${COMMONS_OIDC_CLIENT_SECRET:-}
+      COMMONS_OIDC_NAME: ${COMMONS_OIDC_NAME:-}
       # nginx's connections through the published port arrive from the edge gateway.
       COMMONS_TRUSTED_PROXIES: ${COMMONS_TRUSTED_PROXIES:-172.30.90.1}
       RUST_LOG: ${RUST_LOG:-info}
@@ -60,7 +64,8 @@ services:
       - "127.0.0.1:8090:8080"
     volumes:
       - files:/var/lib/commons/files
-    # `internal` has no outside access; `edge` carries the published port and SMTP/S3 egress.
+    # `internal` has no outside access; `edge` carries the published port and the egress to
+    # SMTP, S3 and the OIDC provider.
     networks: [internal, edge]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
