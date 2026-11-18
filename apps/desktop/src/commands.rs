@@ -20,6 +20,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         subscribe_app,
         add_account,
         remove_account,
+        create_invite,
+        accept_invite,
         subscribe_window,
         ack_window,
         reset_window,
@@ -73,11 +75,61 @@ async fn add_account(
     email: String,
     password: String,
     display_name: Option<String>,
+    invite: Option<String>,
 ) -> R<Uuid> {
     host.core
-        .add_account(&server_url, &email, &password, display_name.as_deref())
+        .add_account(
+            &server_url,
+            &email,
+            &password,
+            display_name.as_deref(),
+            invite.as_deref(),
+        )
         .await
         .map_err(refused)
+}
+
+/// Creates a single-use invite link to a workspace (owners and admins).
+#[tauri::command]
+async fn create_invite(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    workspace_id: Uuid,
+    role: proto::model::Role,
+    expires_in_days: u32,
+) -> R<proto::api::InviteCreated> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.api(
+        Method::Post,
+        &format!("/workspaces/{workspace_id}/invites"),
+        &[],
+        Some(&proto::api::CreateInvite {
+            role,
+            expires_in_days: Some(expires_in_days),
+        }),
+        None,
+    )
+    .await
+    .map_err(refusal)
+}
+
+/// Joins the invite's workspace as this account. The workspace arrives on the user stream.
+#[tauri::command]
+async fn accept_invite(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    token: String,
+) -> R<proto::model::Workspace> {
+    let a = host.core.account(account_id).map_err(err)?;
+    a.api(
+        Method::Post,
+        "/invites/accept",
+        &[],
+        Some(&proto::api::AcceptInvite { token }),
+        None,
+    )
+    .await
+    .map_err(refusal)
 }
 
 /// True when the server ended the session; false when it may still be active there.

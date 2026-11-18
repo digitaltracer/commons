@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use proto::model::ConversationKind;
+use proto::model::{ConversationKind, Role};
 use proto::view::{AppEvent, ConnectionState, ConversationView, DraftReason, SidebarView};
 use serde::Deserialize;
 use serde_json::json;
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::ipc;
 use crate::messages::{Composer, EditBar, MessageList};
-use crate::panels::{Members, Person, Prefs, SignInAgain, Tools};
+use crate::panels::{InvitePeople, JoinInvite, Members, Person, Prefs, SignInAgain, Tools};
 use crate::search::SearchView;
 use crate::spike;
 use crate::state::{Aside, Ctx, Mode, Overlay, Place, Selection, ctx, is_dm};
@@ -201,6 +201,11 @@ fn overlay(o: Overlay) -> AnyView {
         Overlay::Switcher => view! { <Switcher /> }.into_any(),
         Overlay::Prefs(a) => view! { <Prefs account_id=a /> }.into_any(),
         Overlay::SignInAgain(a) => view! { <SignInAgain account_id=a /> }.into_any(),
+        Overlay::Invite {
+            account_id,
+            workspace_id,
+        } => view! { <InvitePeople account_id=account_id workspace_id=workspace_id /> }.into_any(),
+        Overlay::JoinInvite => view! { <JoinInvite /> }.into_any(),
         Overlay::Person {
             account_id,
             user_id,
@@ -365,6 +370,13 @@ fn Side() -> impl IntoView {
                                 {name}{sized(Icon::Chevron, 14)}</button>
                             <div class="hostline">{host}</div>
                         </div>
+                        {ws.as_ref().filter(|w| matches!(w.role, Some(Role::Owner | Role::Admin))).map(|w| {
+                            let workspace_id = w.id;
+                            view! {
+                                <button class="iconbtn" aria-label="Invite people" title="Invite people"
+                                    on:click=move |_| c.overlay.set(Overlay::Invite { account_id, workspace_id })>{icon(Icon::Members)}</button>
+                            }
+                        })}
                         {ws.is_some().then(|| view! {
                             <button class="iconbtn" aria-label="New message" on:click=move |_| c.overlay.set(Overlay::NewDm)>{icon(Icon::Compose)}</button>
                         })}
@@ -627,14 +639,30 @@ fn SignIn() -> impl IntoView {
     let register = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
+    let invite = RwSignal::new(String::new());
     let can_cancel = move || !c.sidebar.with(|s| s.accounts.is_empty());
+    // A pasted link names its server; fill it in.
+    let set_invite = move |pasted: String| {
+        if let (Some(url), _) = proto::api::split_invite(&pasted) {
+            server.set(url);
+        }
+        invite.set(pasted);
+    };
+    if let Some(link) = c.invite_link.get_untracked() {
+        c.invite_link.set(None);
+        set_invite(link);
+        register.set(true);
+    }
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         busy.set(true);
         error.set(None);
         let display = register.get_untracked().then(|| name.get_untracked());
+        let token = invite
+            .with_untracked(|i| (!i.trim().is_empty()).then(|| proto::api::split_invite(i).1));
         let args = json!({"serverUrl": server.get_untracked(), "email": email.get_untracked(),
-                          "password": password.get_untracked(), "displayName": display});
+                          "password": password.get_untracked(), "displayName": display,
+                          "invite": token});
         leptos::task::spawn_local(async move {
             match ipc::invoke::<Uuid>("add_account", args).await {
                 Ok(id) => {
@@ -652,7 +680,9 @@ fn SignIn() -> impl IntoView {
             <form class="signform card" on:submit=submit>
                 <div class="brand"><span class="logo" aria-hidden="true">"C"</span>
                     <h1>{move || if register.get() { "Create a Commons account" } else { "Sign in to Commons" }}</h1></div>
-                <p class="lede">"Use the address of your community's Commons server."</p>
+                <p class="lede">"Use the address of your community's Commons server, or paste an invite link."</p>
+                <label class="flabel">"Invite link (optional)" <input class="field" placeholder="https://…/invite/…"
+                    prop:value=move || invite.get() on:input=move |ev| set_invite(event_target_value(&ev)) /></label>
                 <label class="flabel">"Server" <input class="field" type="url" required prop:value=move || server.get() on:input=move |ev| server.set(event_target_value(&ev)) /></label>
                 <label class="flabel">"Email" <input class="field" type="email" required autocomplete="username" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                 <label class="flabel">"Password" <input class="field" type="password" required minlength="8" autocomplete="current-password" prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) /></label>

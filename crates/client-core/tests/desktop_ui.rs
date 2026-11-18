@@ -232,6 +232,7 @@ async fn a_revoked_session_signs_in_again_and_keeps_its_cache() {
             &alice.user.email,
             "correct horse battery",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -338,6 +339,7 @@ async fn removing_an_account_ends_its_server_session() {
             &alice.user.email,
             "correct horse battery",
             None,
+            None,
         )
     };
 
@@ -360,4 +362,127 @@ async fn removing_an_account_ends_its_server_session() {
     assert!(secrets.get(id).unwrap().is_none());
     let (s, _) = request(&srv, Method::GET, &token, "/me", None).await;
     assert_eq!(s, 200, "the session may still be active on the server");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invite_link_signs_up_or_signs_in_and_joins() {
+    let srv =
+        server::testing::spawn(|c| c.registration = server::config::Registration::Invite).await;
+    let alice = register(&srv, "alice").await;
+    let ws = workspace(&srv, &alice, &[]).await;
+    let link = |role: &str| {
+        let token = alice.token.clone();
+        let role = role.to_string();
+        let srv = &srv;
+        async move {
+            let (s, v) = request(
+                srv,
+                Method::POST,
+                &token,
+                &format!("/workspaces/{}/invites", ws.id),
+                Some(serde_json::json!({"role": role})),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            v["link"].as_str().unwrap().to_string()
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let url = srv.base_url.clone();
+    let core = Core::open(
+        dir.path(),
+        Arc::new(MemorySecrets::default()),
+        Arc::new(RecordingNotifier::default()),
+        Arc::new(move |_: &str| Arc::new(HttpTransport::new(&url)) as Arc<dyn Transport>),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let in_workspace = |id: Uuid| {
+        let acc = core.account(id).unwrap();
+        move || {
+            acc.view()
+                .map(|v| v.workspaces.iter().any(|w| w.id == ws.id))
+                .unwrap_or(false)
+        }
+    };
+
+    // Someone new: the link fills the server and the account joins as it registers.
+    let pasted = link("member").await;
+    let (server_url, token) = proto::api::split_invite(&pasted);
+    assert_eq!(
+        server_url.as_deref(),
+        Some(srv.state.config.public_url.as_str())
+    );
+    let id = core
+        .add_account(
+            &srv.base_url,
+            "newcomer@example.org",
+            "correct horse battery",
+            Some("Newcomer"),
+            Some(&token),
+        )
+        .await
+        .unwrap();
+    eventually("the newcomer has the workspace", in_workspace(id)).await;
+
+    // Someone with an account on the server (from another workspace's invite): signing in
+    // with a link accepts it.
+    let elsewhere = workspace(&srv, &alice, &[]).await;
+    let (s, v) = request(
+        &srv,
+        Method::POST,
+        &alice.token,
+        &format!("/workspaces/{}/invites", elsewhere.id),
+        Some(serde_json::json!({"role": "member"})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let bob = register_with_invite(&srv, v["link"].as_str().unwrap()).await;
+    let pasted = link("guest").await;
+    let id = core
+        .add_account(
+            &srv.base_url,
+            &bob,
+            "correct horse battery",
+            None,
+            Some(&proto::api::split_invite(&pasted).1),
+        )
+        .await
+        .unwrap();
+    eventually("bob has the workspace", in_workspace(id)).await;
+
+    // A refused invite leaves no account behind.
+    let used = proto::api::split_invite(&pasted).1;
+    let before = core.accounts().len();
+    let e = core
+        .add_account(
+            &srv.base_url,
+            "late@example.org",
+            "correct horse battery",
+            Some("Late"),
+            Some(&used),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("invite_used"), "{e:#}");
+    assert_eq!(core.accounts().len(), before);
+}
+
+/// Registers through an invite link over HTTP and returns the email.
+async fn register_with_invite(srv: &server::testing::TestServer, link: &str) -> String {
+    let email = format!("bob-{}@example.org", Uuid::now_v7().simple());
+    let (s, v) = {
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/auth/register", srv.base_url))
+            .json(
+                &serde_json::json!({"email": email, "password": "correct horse battery",
+                "display_name": "bob", "invite": link}),
+            )
+            .send()
+            .await
+            .unwrap();
+        (resp.status().as_u16(), resp.text().await.unwrap())
+    };
+    assert_eq!(s, 200, "{v}");
+    email
 }

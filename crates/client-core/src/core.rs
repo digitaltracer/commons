@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use proto::api::{LoginRequest, RegisterRequest, SessionResponse};
+use proto::api::{AcceptInvite, LoginRequest, RegisterRequest, SessionResponse};
 use proto::view::{AppEvent, SidebarView};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -182,13 +182,15 @@ impl Core {
         Ok(account)
     }
 
-    /// Signs in (or registers) on a server and starts a new account for it.
+    /// Signs in (or registers) on a server and starts a new account for it. With an invite,
+    /// a new account joins its workspace as it registers, and an existing one accepts it.
     pub async fn add_account(
         self: &Arc<Self>,
         server_url: &str,
         email: &str,
         password: &str,
         register: Option<&str>,
+        invite: Option<&str>,
     ) -> anyhow::Result<Uuid> {
         let server_url = server_url.trim().trim_end_matches('/').to_string();
         let transport = (self.transports)(&server_url);
@@ -203,7 +205,7 @@ impl Core {
                         email: email.into(),
                         password: password.into(),
                         display_name: display_name.into(),
-                        invite: None,
+                        invite: invite.map(str::to_string),
                     }),
                     None,
                     None,
@@ -226,6 +228,33 @@ impl Core {
                 .await?
             }
         };
+        if let (None, Some(token)) = (register, invite) {
+            let accepted = call::<proto::model::Workspace>(
+                &*transport,
+                Method::Post,
+                "/invites/accept",
+                &[],
+                Some(&AcceptInvite {
+                    token: token.into(),
+                }),
+                Some(&session.token),
+                None,
+            )
+            .await;
+            if let Err(e) = accepted {
+                let _ = call::<serde_json::Value>(
+                    &*transport,
+                    Method::Post,
+                    "/auth/logout",
+                    &[],
+                    None::<&()>,
+                    Some(&session.token),
+                    None,
+                )
+                .await;
+                return Err(e.into());
+            }
+        }
         let existing = self
             .accounts
             .read()

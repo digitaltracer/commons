@@ -47,7 +47,15 @@ pub enum Overlay {
     Browse,
     NewDm,
     SignInAgain(Uuid),
-    Person { account_id: Uuid, user_id: Uuid },
+    Person {
+        account_id: Uuid,
+        user_id: Uuid,
+    },
+    Invite {
+        account_id: Uuid,
+        workspace_id: Uuid,
+    },
+    JoinInvite,
 }
 
 #[derive(Clone, Copy)]
@@ -70,6 +78,8 @@ pub struct Ctx {
     pub now: RwSignal<f64>,
     /// A one-off message for the whole window, dismissed by the user.
     pub notice: RwSignal<Option<String>>,
+    /// An invite link to start the add-account form with.
+    pub invite_link: RwSignal<Option<String>>,
     /// Last conversation opened in each workspace.
     pub last: StoredValue<HashMap<Uuid, Uuid>>,
 }
@@ -96,6 +106,7 @@ impl Ctx {
             refill: RwSignal::new(None),
             now: RwSignal::new(js_sys::Date::now()),
             notice: RwSignal::new(None),
+            invite_link: RwSignal::new(None),
             last: StoredValue::new(HashMap::new()),
         }
     }

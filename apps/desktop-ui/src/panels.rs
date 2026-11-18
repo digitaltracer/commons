@@ -534,3 +534,141 @@ pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
         </Dialog>
     }
 }
+
+/// Copies text to the clipboard. Returns false when the webview refused.
+async fn copy(text: &str) -> bool {
+    let Some(w) = web_sys::window() else {
+        return false;
+    };
+    wasm_bindgen_futures::JsFuture::from(w.navigator().clipboard().write_text(text))
+        .await
+        .is_ok()
+}
+
+/// Creates a single-use invite link for a workspace and copies it (owners and admins).
+#[component]
+pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
+    let c = ctx();
+    let role = RwSignal::new("member".to_string());
+    let days = RwSignal::new(7u32);
+    let made = RwSignal::new(None::<(String, bool, String)>);
+    let error = RwSignal::new(None::<String>);
+    let busy = RwSignal::new(false);
+    let name = c
+        .workspace(account_id, workspace_id)
+        .map(|w| w.name)
+        .unwrap_or_default();
+    let create = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        busy.set(true);
+        error.set(None);
+        let args = json!({"accountId": account_id, "workspaceId": workspace_id,
+                          "role": role.get_untracked(), "expiresInDays": days.get_untracked()});
+        leptos::task::spawn_local(async move {
+            match ipc::invoke::<proto::api::InviteCreated>("create_invite", args).await {
+                Ok(i) => {
+                    let copied = copy(&i.link).await;
+                    let until = js_sys::Date::new(&(i.invite.expires_at_ms as f64).into())
+                        .to_locale_date_string("default", &js_sys::Object::new())
+                        .as_string()
+                        .unwrap_or_default();
+                    made.set(Some((i.link, copied, until)));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            busy.set(false);
+        });
+    };
+    view! {
+        <Dialog label=format!("Invite people to {name}")>
+            <form on:submit=create>
+                <div class="dbody">
+                    <p class="muted">"Each link works once, for one person. Send it to them; they paste it into Commons."</p>
+                    <label class="flabel">"Joins as"
+                        <select class="field" on:change=move |ev| role.set(event_target_value(&ev))>
+                            <option value="member" selected=true>"Member"</option>
+                            <option value="guest">"Guest: only the channels they're added to"</option>
+                        </select></label>
+                    <label class="flabel">"Expires after"
+                        <select class="field" on:change=move |ev| days.set(event_target_value(&ev).parse().unwrap_or(7))>
+                            <option value="1">"1 day"</option>
+                            <option value="7" selected=true>"7 days"</option>
+                            <option value="30">"30 days"</option>
+                        </select></label>
+                    {move || made.get().map(|(link, copied, until)| view! {
+                        <label class="flabel">{if copied { "Copied to the clipboard" } else { "Copy this link" }}
+                            <input class="field" readonly prop:value=link on:focus=move |ev| {
+                                if let Some(i) = ev.target().and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlInputElement>(t).ok()) { i.select() }
+                            } /></label>
+                        <p class="muted">{format!("Works once, until {until}.")}</p>
+                    })}
+                    {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
+                </div>
+                <footer class="dfoot"><button type="submit" class="btn primary" disabled=move || busy.get()>
+                    {move || if made.get().is_some() { "Create another link" } else { "Create link" }}</button></footer>
+            </form>
+        </Dialog>
+    }
+}
+
+/// Joins another workspace with a pasted invite link, as the account on that link's server.
+#[component]
+pub fn JoinInvite() -> impl IntoView {
+    let c = ctx();
+    let pasted = RwSignal::new(String::new());
+    let error = RwSignal::new(None::<String>);
+    let busy = RwSignal::new(false);
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let link = pasted.get_untracked();
+        let (server, token) = proto::api::split_invite(&link);
+        let accounts = c.sidebar.get_untracked().accounts;
+        let same = |a: &&proto::view::AccountView| {
+            server.as_deref().map(|s| s.trim_end_matches('/'))
+                == Some(a.server_url.trim_end_matches('/'))
+        };
+        let account = match (&server, accounts.len()) {
+            (Some(_), _) => accounts.iter().find(same).map(|a| a.id),
+            (None, 1) => accounts.first().map(|a| a.id),
+            (None, _) => {
+                error.set(Some(
+                    "Paste the whole link, so Commons knows which server it's for.".into(),
+                ));
+                return;
+            }
+        };
+        let Some(account_id) = account else {
+            // No account on that server yet: sign up or in there, with the link.
+            c.invite_link.set(Some(link));
+            c.overlay.set(Overlay::None);
+            c.adding.set(true);
+            return;
+        };
+        busy.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            let args = json!({"accountId": account_id, "token": token});
+            match ipc::invoke::<proto::model::Workspace>("accept_invite", args).await {
+                Ok(w) => {
+                    c.overlay.set(Overlay::None);
+                    c.go_to_workspace(account_id, Some(w.id));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            busy.set(false);
+        });
+    };
+    view! {
+        <Dialog label="Join with an invite link">
+            <form on:submit=submit>
+                <div class="dbody">
+                    <label class="flabel">"Invite link"
+                        <input class="field" required autofocus placeholder="https://…/invite/…"
+                            prop:value=move || pasted.get() on:input=move |ev| pasted.set(event_target_value(&ev)) /></label>
+                    {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
+                </div>
+                <footer class="dfoot"><button type="submit" class="btn primary" disabled=move || busy.get()>"Join"</button></footer>
+            </form>
+        </Dialog>
+    }
+}

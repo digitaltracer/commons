@@ -130,6 +130,7 @@ pub fn Switcher() -> impl IntoView {
             </div>
             <div class="pfoot">
                 <button class="fbtn" on:click=move |_| { close(); c.adding.set(true); }>{icon(Icon::Plus)}"Add a server account"</button>
+                <button class="fbtn" on:click=move |_| c.overlay.set(Overlay::JoinInvite)>{icon(Icon::Link)}"Join with an invite link"</button>
                 <button class="fbtn quiet" aria-pressed=move || manage.get().to_string()
                     on:click=move |_| manage.update(|m| *m = !*m)>
                     {move || if manage.get() { "Done" } else { "Manage accounts" }}</button>

@@ -115,6 +115,15 @@ pub struct InviteList {
     pub invites: Vec<Invite>,
 }
 
+/// Splits a pasted invite into the server URL (when it is a whole link) and the token.
+pub fn split_invite(pasted: &str) -> (Option<String>, String) {
+    let p = pasted.trim().trim_end_matches('/');
+    match p.rsplit_once("/invite/") {
+        Some((server, token)) => (Some(server.to_string()), token.to_string()),
+        None => (None, p.to_string()),
+    }
+}
+
 /// Accepts an invite as the signed-in user: an invite token, or the whole link.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
