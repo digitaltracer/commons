@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::config::Registration;
 use crate::error::{ApiError, ApiResult};
 
 pub fn routes() -> Router<AppState> {
@@ -117,6 +118,21 @@ fn normalise_email(email: &str) -> ApiResult<String> {
     Ok(e)
 }
 
+fn check_registration(rule: &Registration, email: &str) -> ApiResult<()> {
+    match rule {
+        Registration::Open => Ok(()),
+        Registration::Closed => Err(ApiError::Refused(
+            "registration_closed",
+            "registration is closed on this server".into(),
+        )),
+        Registration::Allowlist(emails) if emails.iter().any(|e| e == email) => Ok(()),
+        Registration::Allowlist(_) => Err(ApiError::Refused(
+            "registration_not_allowed",
+            "this email is not on this server's registration list".into(),
+        )),
+    }
+}
+
 fn check_password(p: &str) -> ApiResult<()> {
     if p.chars().count() < 8 || p.len() > 1024 {
         return Err(ApiError::BadRequest(
@@ -137,12 +153,17 @@ async fn create_session(pool: &sqlx::PgPool, user_id: Uuid) -> ApiResult<String>
 }
 
 #[utoipa::path(post, path = "/v1/auth/register", request_body = RegisterRequest,
-    responses((status = 200, body = SessionResponse)))]
+    responses(
+        (status = 200, body = SessionResponse),
+        (status = 403, description = "registration is closed, or the email is not allowed",
+            body = proto::api::ErrorBody),
+    ))]
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
     let email = normalise_email(&req.email)?;
+    check_registration(&state.config.registration, &email)?;
     check_password(&req.password)?;
     let name = req.display_name.trim();
     if name.is_empty() || name.len() > 80 {

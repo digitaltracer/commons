@@ -27,6 +27,16 @@ pub struct Config {
     pub s3_bucket: Option<String>,
     pub max_file_bytes: u64,
     pub user_quota_bytes: u64,
+    pub registration: Registration,
+}
+
+/// Who may create an account through `/v1/auth/register`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Registration {
+    Open,
+    Closed,
+    /// Normalised (trimmed, lowercased) emails.
+    Allowlist(Vec<String>),
 }
 
 impl Default for Config {
@@ -51,6 +61,7 @@ impl Default for Config {
             s3_bucket: None,
             max_file_bytes: 2 << 30,
             user_quota_bytes: 20 << 30,
+            registration: Registration::Open,
         }
     }
 }
@@ -82,6 +93,35 @@ impl Config {
         if let Some(v) = var("COMMONS_USER_QUOTA_BYTES") {
             c.user_quota_bytes = v.parse()?;
         }
+        c.registration = Registration::parse(
+            var("COMMONS_REGISTRATION").as_deref(),
+            var("COMMONS_REGISTRATION_ALLOWLIST").as_deref(),
+        )?;
         Ok(c)
+    }
+}
+
+impl Registration {
+    pub fn parse(mode: Option<&str>, allowlist: Option<&str>) -> anyhow::Result<Self> {
+        match mode.map(str::trim) {
+            None | Some("open") => Ok(Registration::Open),
+            Some("closed") => Ok(Registration::Closed),
+            Some("allowlist") => {
+                let emails: Vec<String> = allowlist
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|e| e.trim().to_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                anyhow::ensure!(
+                    !emails.is_empty(),
+                    "COMMONS_REGISTRATION=allowlist needs COMMONS_REGISTRATION_ALLOWLIST"
+                );
+                Ok(Registration::Allowlist(emails))
+            }
+            Some(other) => anyhow::bail!(
+                "COMMONS_REGISTRATION must be open, closed or allowlist, not {other:?}"
+            ),
+        }
     }
 }

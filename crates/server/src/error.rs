@@ -12,6 +12,9 @@ pub enum ApiError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    /// A 403 with its own code and wording, for refusals the client shows as they are.
+    #[error("{1}")]
+    Refused(&'static str, String),
     #[error("not found")]
     NotFound,
     #[error("conflict")]
@@ -42,6 +45,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::Refused(code, _) => (StatusCode::FORBIDDEN, *code),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Conflict(v) => {
                 return (StatusCode::CONFLICT, Json(v.clone())).into_response();

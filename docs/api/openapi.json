@@ -76,6 +76,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "registration is closed, or the email is not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
