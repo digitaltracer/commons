@@ -1,0 +1,81 @@
+# Commons behind the host's nginx: Postgres plus commonsd, with only 127.0.0.1:8090 published.
+# Settings come from deploy/.env (copy env.example), which compose reads for the ${...} below.
+# Run from the repo root: docker compose -f deploy/compose.yaml up -d --build
+name: commons
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: commons
+      POSTGRES_DB: commons
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    command: ["postgres", "-c", "shared_buffers=512MB"]
+    shm_size: 256mb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U commons -d commons"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # With commonsd: 2 vCPU and 4 GB in all.
+    cpus: 1.0
+    mem_limit: 2g
+    logging: *logging
+
+  commonsd:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Fixed by this stack.
+      COMMONS_DATABASE_URL: postgres://commons:${POSTGRES_PASSWORD}@postgres:5432/commons
+      COMMONS_BIND: 0.0.0.0:8080
+      COMMONS_FILES_DIR: /var/lib/commons/files
+      # From deploy/.env; an empty value means the server default.
+      COMMONS_PUBLIC_URL: ${COMMONS_PUBLIC_URL:?set COMMONS_PUBLIC_URL in deploy/.env}
+      COMMONS_REGISTRATION: ${COMMONS_REGISTRATION:-}
+      COMMONS_REGISTRATION_ALLOWLIST: ${COMMONS_REGISTRATION_ALLOWLIST:-}
+      COMMONS_MAX_FILE_BYTES: ${COMMONS_MAX_FILE_BYTES:-}
+      COMMONS_USER_QUOTA_BYTES: ${COMMONS_USER_QUOTA_BYTES:-}
+      COMMONS_SMTP_URL: ${COMMONS_SMTP_URL:-}
+      COMMONS_MAIL_FROM: ${COMMONS_MAIL_FROM:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - files:/var/lib/commons/files
+    # `internal` has no outside access; `edge` carries the published port and SMTP/S3 egress.
+    networks: [internal, edge]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    cpus: 1.0
+    mem_limit: 2g
+    logging: *logging
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  pgdata:
+  files:
