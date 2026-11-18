@@ -10,7 +10,7 @@ use client_core::platform::{MemorySecrets, RecordingNotifier, SecretStore};
 use client_core::transport::{HttpTransport, Transport};
 use common::*;
 use proto::model::{Entity, Preferences};
-use proto::view::{ConnectionState, SidebarView};
+use proto::view::{ConnectionState, SessionEnd, SidebarView};
 use reqwest::Method;
 use uuid::Uuid;
 
@@ -256,14 +256,23 @@ async fn a_revoked_session_signs_in_again_and_keeps_its_cache() {
     .await;
     eventually("the UI hears about it", || {
         sidebars.lock().unwrap().iter().any(|s| {
-            s.accounts
-                .iter()
-                .any(|a| a.id == id && a.connection == ConnectionState::SignedOut)
+            s.accounts.iter().any(|a| {
+                a.id == id
+                    && a.connection == ConnectionState::SignedOut
+                    && a.session_end == Some(SessionEnd::Revoked)
+            })
         })
     })
     .await;
 
-    assert!(core.sign_in_again(id, "wrong password").await.is_err());
+    let wrong = core.sign_in_again(id, "wrong password").await.unwrap_err();
+    assert!(
+        wrong
+            .to_string()
+            .starts_with("That password didn't work for"),
+        "{wrong}"
+    );
+    assert_eq!(acc.session_end(), Some(SessionEnd::Revoked), "still ended");
     core.sign_in_again(id, "correct horse battery")
         .await
         .unwrap();
@@ -271,6 +280,7 @@ async fn a_revoked_session_signs_in_again_and_keeps_its_cache() {
         acc.connection() == ConnectionState::Online
     })
     .await;
+    assert_eq!(acc.session_end(), None);
     assert_ne!(
         secrets.get(id).unwrap().unwrap(),
         token,
@@ -284,6 +294,78 @@ async fn a_revoked_session_signs_in_again_and_keeps_its_cache() {
             .iter()
             .any(|m| m.body == "cached"),
         "same account, same cache"
+    );
+    acc.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_without_a_saved_token_says_so_and_signs_in_again() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let reachable = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let open = || {
+        let url = srv.base_url.clone();
+        let up = reachable.clone();
+        Core::open(
+            dir.path(),
+            secrets.clone(),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(move |_: &str| {
+                let u = if up.load(std::sync::atomic::Ordering::SeqCst) {
+                    url.clone()
+                } else {
+                    "http://127.0.0.1:9".to_string()
+                };
+                Arc::new(HttpTransport::new(&u)) as Arc<dyn Transport>
+            }),
+            Arc::new(|_| {}),
+        )
+        .unwrap()
+    };
+    let core = open();
+    let id = core
+        .add_account(
+            &srv.base_url,
+            &alice.user.email,
+            "correct horse battery",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    core.account(id).unwrap().stop();
+    drop(core);
+
+    // The saved account comes back, but its token is gone from this device.
+    secrets.delete(id).unwrap();
+    let core = open();
+    let acc = core.account(id).unwrap();
+    eventually("signed out", || {
+        acc.connection() == ConnectionState::SignedOut
+    })
+    .await;
+    assert_eq!(acc.session_end(), Some(SessionEnd::NoToken));
+    let view = core.sidebar().unwrap();
+    assert_eq!(view.accounts[0].session_end, Some(SessionEnd::NoToken));
+
+    reachable.store(false, std::sync::atomic::Ordering::SeqCst);
+    let down = core
+        .sign_in_again(id, "correct horse battery")
+        .await
+        .unwrap_err();
+    assert!(down.to_string().starts_with("Couldn't reach"), "{down}");
+
+    reachable.store(true, std::sync::atomic::Ordering::SeqCst);
+    core.sign_in_again(id, "correct horse battery")
+        .await
+        .unwrap();
+    eventually("online", || acc.connection() == ConnectionState::Online).await;
+    assert_eq!(acc.session_end(), None);
+    assert!(
+        secrets.get(id).unwrap().is_some(),
+        "the new session is saved"
     );
     acc.stop();
 }
