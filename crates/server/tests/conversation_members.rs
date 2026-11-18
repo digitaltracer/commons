@@ -226,3 +226,90 @@ async fn search_hits_carry_their_author() {
     assert_eq!(r["hits"][0]["author_id"], alice.id.to_string());
     assert!(r["hits"][0]["thread_root_id"].is_null());
 }
+
+async fn bodies_since(
+    srv: &server::testing::TestServer,
+    p: &Person,
+    ws: Uuid,
+    since: i64,
+) -> Vec<String> {
+    let (s, v) = replay(srv, p, ws, since).await;
+    assert_eq!(s, 200, "{v}");
+    v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["body"]["message"]["body"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reopening_a_dm_after_one_person_left_restores_both() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let bob = register(&srv, "bob").await;
+    let ws = workspace(&srv, &alice, &[&bob]).await;
+    let dms = format!("/workspaces/{}/dms", ws.id);
+    let open = serde_json::json!({"user_ids": [bob.id]});
+    let dm = ok(&srv, Method::POST, &alice, &dms, Some(open.clone())).await;
+    let dm: Uuid = dm["id"].as_str().unwrap().parse().unwrap();
+
+    // Bob leaves; then the person who stayed reopens it.
+    ok(
+        &srv,
+        Method::POST,
+        &bob,
+        &format!("/conversations/{dm}/leave"),
+        None,
+    )
+    .await;
+    let since = head(&srv, ws.id).await;
+    let again = ok(&srv, Method::POST, &alice, &dms, Some(open)).await;
+    assert_eq!(again["id"], dm.to_string(), "the same DM");
+    let members: Vec<Uuid> = serde_json::from_value(again["dm_user_ids"].clone()).unwrap();
+    assert_eq!(members, sorted(vec![alice.id, bob.id]));
+    let (s, v) = replay(&srv, &bob, ws.id, since).await;
+    assert_eq!(s, 200);
+    assert!(
+        v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["body"]["type"] == "member_added"
+                && e["body"]["user_id"] == bob.id.to_string()),
+        "bob's client hears member_added and backfills: {v}"
+    );
+    post(&srv, &alice, dm, "from alice").await;
+    post(&srv, &bob, dm, "from bob").await;
+    for p in [&alice, &bob] {
+        assert_eq!(
+            bodies_since(&srv, p, ws.id, since).await,
+            vec!["from alice", "from bob"]
+        );
+    }
+
+    // The one who left can reopen it as well.
+    ok(
+        &srv,
+        Method::POST,
+        &alice,
+        &format!("/conversations/{dm}/leave"),
+        None,
+    )
+    .await;
+    let since = head(&srv, ws.id).await;
+    let again = ok(
+        &srv,
+        Method::POST,
+        &alice,
+        &dms,
+        Some(serde_json::json!({"user_ids": [bob.id]})),
+    )
+    .await;
+    assert_eq!(again["id"], dm.to_string());
+    post(&srv, &bob, dm, "welcome back").await;
+    assert_eq!(
+        bodies_since(&srv, &alice, ws.id, since).await,
+        vec!["welcome back"]
+    );
+}

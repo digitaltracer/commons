@@ -586,9 +586,26 @@ pub async fn open_dm(
             .fetch_optional(&mut *tx)
             .await?;
     if let Some(id) = existing {
-        tx.rollback().await?;
-        let mut conn = state.pool.acquire().await?;
-        return Ok(Json(load(&mut conn, id).await?));
+        // Reopening restores whoever left: the caller, and in a 1:1 DM the other person too.
+        let mut c = load(&mut tx, id).await?;
+        let regrant = if c.kind == ConversationKind::Dm {
+            ids.clone()
+        } else {
+            vec![auth.user_id]
+        };
+        c.dm_user_ids.extend(regrant.iter().copied());
+        c.dm_user_ids.sort();
+        c.dm_user_ids.dedup();
+        let mut events = vec![];
+        for u in &regrant {
+            events.extend(grant(&mut tx, &c, *u, AccessVia::Membership).await?);
+        }
+        if !events.is_empty() {
+            sync::append(&mut tx, workspace_id, events).await?;
+            rekey_group_dm(&mut tx, c.id).await?;
+        }
+        tx.commit().await?;
+        return Ok(Json(c));
     }
     let kind = if ids.len() <= 2 {
         ConversationKind::Dm
