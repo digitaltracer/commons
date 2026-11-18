@@ -171,12 +171,17 @@ a { color: var(--accent); }
 .time { font-size: 11.5px; color: var(--text3); }
 .body { font-size: 14px; line-height: 1.45; margin-top: 1px; overflow-wrap: anywhere; }
 .body p { margin: 0; white-space: pre-wrap; }
-.body p + p { margin-top: 4px; }
-.body ul { margin: 3px 0 0; padding-left: 20px; }
+/* Blank lines between blocks come from .gap rows, so blocks themselves sit flush. */
+.body ul, .body ol { margin: 3px 0 0; padding-left: 22px; }
 .body blockquote { margin: 4px 0; padding-left: 10px; border-left: 3px solid var(--line2); color: var(--text2); }
-.ic, .body code { white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.ic { white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
 .pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 6px 0 0; white-space: pre-wrap; overflow-x: auto; }
-.pre code { border: 0; padding: 0; background: none; }
+.pre code { font: inherit; border: 0; padding: 0; background: none; }
+.cb { margin: 6px 0 0; border: 1px solid var(--line); border-radius: 6px; background: var(--code); overflow: hidden; max-width: 760px; }
+.cb .pre { margin: 0; border: 0; border-radius: 0; white-space: pre; line-height: 1.5; }
+.cbh { display: flex; align-items: center; height: 26px; padding: 0 4px 0 10px; background: var(--hover); border-bottom: 1px solid var(--line); font-size: 11.5px; font-weight: 600; color: var(--text3); }
+.cbcopy { margin-left: auto; height: 20px; padding: 0 7px; border-radius: 5px; font-size: 11.5px; font-weight: 600; color: var(--text2); }
+.cbcopy:hover { background: var(--hover); }
 .men { display: inline; border-radius: 4px; padding: 0 3px; background: var(--accentsoft); color: var(--accenttext); font-weight: 600; }
 .men.me { background: var(--mepill); color: var(--metext); }
 .men:disabled { opacity: 1; }
