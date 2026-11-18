@@ -804,13 +804,14 @@ async fn copy(text: &str) -> bool {
         .is_ok()
 }
 
-/// Creates a single-use invite link for a workspace and copies it (owners and admins).
+/// Creates a single-use invite link for one email address and copies it (owners and admins).
 #[component]
 pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
     let c = ctx();
+    let email = RwSignal::new(String::new());
     let role = RwSignal::new("member".to_string());
     let days = RwSignal::new(7u32);
-    let made = RwSignal::new(None::<(String, bool, String)>);
+    let made = RwSignal::new(None::<(String, bool, String, String)>);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
     let name = c
@@ -819,9 +820,16 @@ pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
         .unwrap_or_default();
     let create = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        let to = email.get_untracked().trim().to_string();
+        if !looks_like_email(&to) {
+            error.set(Some(
+                "Enter the email address of the person you're inviting.".into(),
+            ));
+            return;
+        }
         busy.set(true);
         error.set(None);
-        let args = json!({"accountId": account_id, "workspaceId": workspace_id,
+        let args = json!({"accountId": account_id, "workspaceId": workspace_id, "email": to,
                           "role": role.get_untracked(), "expiresInDays": days.get_untracked()});
         leptos::task::spawn_local(async move {
             match ipc::invoke::<proto::api::InviteCreated>("create_invite", args).await {
@@ -831,7 +839,8 @@ pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
                         .to_locale_date_string("default", &js_sys::Object::new())
                         .as_string()
                         .unwrap_or_default();
-                    made.set(Some((i.link, copied, until)));
+                    let to = i.invite.email.unwrap_or_default();
+                    made.set(Some((i.link, copied, to, until)));
                 }
                 Err(e) => error.set(Some(e)),
             }
@@ -842,7 +851,10 @@ pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
         <Dialog label=format!("Invite people to {name}")>
             <form on:submit=create>
                 <div class="dbody">
-                    <p class="muted">"Each link works once, for one person. Send it to them; they paste it into Commons."</p>
+                    <p class="muted">"Each link works once, for the email address you enter. Send it to that person; they paste it into Commons and sign up with that address."</p>
+                    <label class="flabel">"Email"
+                        <input class="field" type="email" required autofocus autocomplete="off" placeholder="name@example.org"
+                            prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                     <label class="flabel">"Joins as"
                         <select class="field" on:change=move |ev| role.set(event_target_value(&ev))>
                             <option value="member" selected=true>"Member"</option>
@@ -854,12 +866,12 @@ pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
                             <option value="7" selected=true>"7 days"</option>
                             <option value="30">"30 days"</option>
                         </select></label>
-                    {move || made.get().map(|(link, copied, until)| view! {
+                    {move || made.get().map(|(link, copied, to, until)| view! {
                         <label class="flabel">{if copied { "Copied to the clipboard" } else { "Copy this link" }}
                             <input class="field" readonly prop:value=link on:focus=move |ev| {
                                 if let Some(i) = ev.target().and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlInputElement>(t).ok()) { i.select() }
                             } /></label>
-                        <p class="muted">{format!("Works once, until {until}.")}</p>
+                        <p class="muted">{format!("Invite for {to} · expires {until}")}</p>
                     })}
                     {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
                 </div>
@@ -868,6 +880,13 @@ pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
             </form>
         </Dialog>
     }
+}
+
+/// A light check before the server's: something on each side of one `@`.
+pub(crate) fn looks_like_email(s: &str) -> bool {
+    let s = s.trim();
+    matches!(s.split_once('@'), Some((user, host)) if !user.is_empty() && !host.is_empty()
+        && !host.contains('@') && !s.contains(char::is_whitespace))
 }
 
 /// Joins another workspace with a pasted invite link, as the account on that link's server.
@@ -929,5 +948,18 @@ pub fn JoinInvite() -> impl IntoView {
                 <footer class="dfoot"><button type="submit" class="btn primary" disabled=move || busy.get()>"Join"</button></footer>
             </form>
         </Dialog>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_email;
+
+    #[test]
+    fn an_invite_needs_something_like_an_email() {
+        assert!(looks_like_email(" x@gmail.com "));
+        for bad in ["", "x", "x@", "@gmail.com", "a@b@c", "a b@c.org"] {
+            assert!(!looks_like_email(bad), "{bad:?}");
+        }
     }
 }

@@ -160,7 +160,10 @@ fn role_name(r: Role) -> &'static str {
 }
 
 fn invite_state(i: &Invite, now_ms: i64) -> (&'static str, bool) {
-    if i.revoked_at_ms.is_some() {
+    if i.email.is_none() {
+        // Made before invites were bound to an email address; the server refuses these.
+        ("Not valid", false)
+    } else if i.revoked_at_ms.is_some() {
         ("Revoked", false)
     } else if i.used_at_ms.is_some() {
         ("Used", false)
@@ -305,17 +308,18 @@ pub fn WorkspaceAdmin(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
                             let (state, live) = invite_state(&i, now);
                             let by = name_for(i.created_by);
                             let detail = match i.used_by {
-                                Some(u) if i.used_at_ms.is_some() => format!("Used by {}", name_for(u)),
-                                _ => format!("By {by}, until {}", date(i.expires_at_ms)),
+                                Some(u) if i.used_at_ms.is_some() => format!("{} · used by {}", role_name(i.role), name_for(u)),
+                                _ => format!("{} · by {by}, until {}", role_name(i.role), date(i.expires_at_ms)),
                             };
+                            let to = i.email.clone().unwrap_or_else(|| "No email address".into());
                             let invite_id = i.id;
                             view! {
                                 <li class="mrow arow">
-                                    <span class="mname">{format!("{} invite", role_name(i.role))}</span>
+                                    <span class="mname">{to}</span>
                                     <span class="muted">{detail}</span>
                                     <span class="chip" class:on=live>{state}</span>
                                     {live.then(|| view! {
-                                        <button class="plink danger" aria-label=format!("Revoke the {} invite made {}", role_name(i.role).to_lowercase(), date(i.created_at_ms))
+                                        <button class="plink danger" aria-label=format!("Revoke the invite for {}", i.email.as_deref().unwrap_or_default())
                                             on:click=move |_| act("revoke_invite", json!({"accountId": account_id,
                                                 "workspaceId": workspace_id, "inviteId": invite_id}))>"Revoke"</button>
                                     })}
