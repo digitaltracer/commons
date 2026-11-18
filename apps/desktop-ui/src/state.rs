@@ -68,6 +68,8 @@ pub struct Ctx {
     pub refill: RwSignal<Option<(Uuid, String)>>,
     /// Seconds tick, for reconnect countdowns.
     pub now: RwSignal<f64>,
+    /// A one-off message for the whole window, dismissed by the user.
+    pub notice: RwSignal<Option<String>>,
     /// Last conversation opened in each workspace.
     pub last: StoredValue<HashMap<Uuid, Uuid>>,
 }
@@ -93,6 +95,7 @@ impl Ctx {
             editing: RwSignal::new(None),
             refill: RwSignal::new(None),
             now: RwSignal::new(js_sys::Date::now()),
+            notice: RwSignal::new(None),
             last: StoredValue::new(HashMap::new()),
         }
     }

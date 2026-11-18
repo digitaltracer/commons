@@ -80,9 +80,10 @@ async fn add_account(
         .map_err(refused)
 }
 
+/// True when the server ended the session; false when it may still be active there.
 #[tauri::command]
-fn remove_account(host: State<'_, Host>, account_id: Uuid) -> R<()> {
-    host.core.remove_account(account_id).map_err(err)
+async fn remove_account(host: State<'_, Host>, account_id: Uuid) -> R<bool> {
+    host.core.remove_account(account_id).await.map_err(err)
 }
 
 #[tauri::command]

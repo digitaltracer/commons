@@ -28,6 +28,7 @@ pub fn Switcher() -> impl IntoView {
 
     let account = move |a: AccountView| {
         let account_id = a.id;
+        let server_host = StoredValue::new(ui::host(&a.server_url));
         let (status, dot) = status_label(&a);
         let signed_out = a.connection == ConnectionState::SignedOut;
         let f = find.get().to_lowercase();
@@ -101,7 +102,15 @@ pub fn Switcher() -> impl IntoView {
                     <div class="manage">
                         <button class="btn danger" on:click=move |_| {
                             close();
-                            ipc::command("remove_account", json!({"accountId": account_id}));
+                            let host = server_host.get_value();
+                            leptos::task::spawn_local(async move {
+                                match ipc::invoke::<bool>("remove_account", json!({"accountId": account_id})).await {
+                                    Ok(true) => {}
+                                    Ok(false) => c.notice.set(Some(format!(
+                                        "Removed from this Mac, but {host} could not be reached to end the session. It may still be active on the server."))),
+                                    Err(e) => ipc::warn(format!("remove_account: {e}")),
+                                }
+                            });
                         }>"Sign out and remove from this Mac"</button>
                     </div>
                 </Show>

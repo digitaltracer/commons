@@ -233,7 +233,7 @@ impl Core {
             .find(|a| a.server_url == server_url && a.user.id == session.user.id)
             .map(|a| a.id);
         if let Some(id) = existing {
-            self.remove_account(id)?;
+            self.remove_account(id).await?;
         }
         let id = Uuid::now_v7();
         self.secrets.set(id, &session.token)?;
@@ -289,7 +289,38 @@ impl Core {
         self.events()
     }
 
-    pub fn remove_account(self: &Arc<Self>, id: Uuid) -> anyhow::Result<()> {
+    /// Signs the account out on its server, then removes it from this device. Removal goes
+    /// ahead even when logout fails; the result is false then, because the server-side
+    /// session may still be active.
+    pub async fn remove_account(self: &Arc<Self>, id: Uuid) -> anyhow::Result<bool> {
+        let server_url = self.account(id).ok().map(|a| a.server_url.clone());
+        let revoked = match (server_url, self.secrets.get(id).unwrap_or(None)) {
+            (Some(url), Some(token)) => {
+                let transport = (self.transports)(&url);
+                let logout = call::<serde_json::Value>(
+                    &*transport,
+                    Method::Post,
+                    "/auth/logout",
+                    &[],
+                    None::<&()>,
+                    Some(&token),
+                    None,
+                );
+                match tokio::time::timeout(Duration::from_secs(10), logout).await {
+                    Ok(Ok(_)) => true,
+                    Ok(Err(e)) => {
+                        tracing::warn!(account = %id, error = %e, "logout failed");
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(account = %id, "logout timed out");
+                        false
+                    }
+                }
+            }
+            // No token: there is no session to end.
+            _ => true,
+        };
         let removed = self
             .accounts
             .write()
@@ -302,7 +333,7 @@ impl Core {
         }
         self.save()?;
         self.on_account_event(id, AccountEvent::Sidebar);
-        Ok(())
+        Ok(revoked)
     }
 
     pub fn account(&self, id: Uuid) -> anyhow::Result<Account> {

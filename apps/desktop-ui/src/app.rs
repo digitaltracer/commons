@@ -156,6 +156,12 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
+        {move || c.notice.get().map(|n| view! {
+            <div class="notice" role="status">
+                <span>{n}</span>
+                <button class="bbtn" on:click=move |_| c.notice.set(None)>"Dismiss"</button>
+            </div>
+        })}
         <Show when=move || loaded.get() fallback=|| view! { <div class="win"><p class="empty">"Loading…"</p></div> }>
             <Show when=move || !c.sidebar.with(|s| s.accounts.is_empty()) && !c.adding.get()
                   fallback=move || view! { <SignIn /> }>

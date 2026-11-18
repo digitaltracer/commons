@@ -307,3 +307,57 @@ async fn revoking_the_session_while_online_signs_out_without_retrying() {
     assert_eq!(srv.state.hub.connections(alice.user.id), 0);
     a.stop();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_an_account_ends_its_server_session() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let reachable = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let up = reachable.clone();
+    let url = srv.base_url.clone();
+    let core = Core::open(
+        dir.path(),
+        secrets.clone(),
+        Arc::new(RecordingNotifier::default()),
+        Arc::new(move |_: &str| {
+            let u = if up.load(std::sync::atomic::Ordering::SeqCst) {
+                url.clone()
+            } else {
+                "http://127.0.0.1:9".to_string()
+            };
+            Arc::new(HttpTransport::new(&u)) as Arc<dyn Transport>
+        }),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let add = || {
+        core.add_account(
+            &srv.base_url,
+            &alice.user.email,
+            "correct horse battery",
+            None,
+        )
+    };
+
+    let id = add().await.unwrap();
+    let token = secrets.get(id).unwrap().unwrap();
+    assert!(
+        core.remove_account(id).await.unwrap(),
+        "the server ended it"
+    );
+    let (s, _) = request(&srv, Method::GET, &token, "/me", None).await;
+    assert_eq!(s, 401, "the removed account's token no longer works");
+    assert!(secrets.get(id).unwrap().is_none());
+
+    // Logout fails: the account is still removed here, and the caller hears about it.
+    let id = add().await.unwrap();
+    let token = secrets.get(id).unwrap().unwrap();
+    reachable.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(!core.remove_account(id).await.unwrap());
+    assert!(core.account(id).is_err());
+    assert!(secrets.get(id).unwrap().is_none());
+    let (s, _) = request(&srv, Method::GET, &token, "/me", None).await;
+    assert_eq!(s, 200, "the session may still be active on the server");
+}
