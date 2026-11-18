@@ -24,6 +24,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (4, "files", include_str!("../migrations/0004_files.sql")),
     (5, "search", include_str!("../migrations/0005_search.sql")),
+    (6, "invites", include_str!("../migrations/0006_invites.sql")),
 ];
 
 pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {

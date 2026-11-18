@@ -1,4 +1,4 @@
-//! `COMMONS_REGISTRATION`: open, closed and allowlist.
+//! `COMMONS_REGISTRATION`: open, closed and invite (invite mode itself is in `invites.rs`).
 mod common;
 
 use common::call;
@@ -47,39 +47,32 @@ async fn closed_refuses_everyone_with_a_message() {
     assert_eq!(s, 401, "no account was created");
 }
 
-#[tokio::test]
-async fn allowlist_admits_listed_emails_after_normalisation() {
-    let rule = Registration::parse(
-        Some("allowlist"),
-        Some(" Ada@Example.org , grace@example.org,"),
-    )
-    .unwrap();
-    let srv = spawn(move |c| c.registration = rule).await;
-
-    let (s, v) = try_register(&srv, "  ADA@example.ORG ").await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(v["user"]["email"], "ada@example.org");
-    let (s, v) = try_register(&srv, "grace@example.org").await;
-    assert_eq!(s, 200, "{v}");
-
-    let (s, v) = try_register(&srv, "mallory@example.org").await;
-    assert_eq!(s, 403, "{v}");
-    assert_eq!(v["error"], "registration_not_allowed");
-    assert!(v["message"].as_str().unwrap().contains("registration list"));
-}
-
 #[test]
 fn parse_modes() {
     assert_eq!(Registration::parse(None, None).unwrap(), Registration::Open);
     assert_eq!(
-        Registration::parse(Some("open"), Some("x@y.z")).unwrap(),
+        Registration::parse(Some("open"), None).unwrap(),
         Registration::Open
     );
     assert_eq!(
         Registration::parse(Some("closed"), None).unwrap(),
         Registration::Closed
     );
-    assert!(Registration::parse(Some("allowlist"), None).is_err());
-    assert!(Registration::parse(Some("allowlist"), Some(" , ")).is_err());
-    assert!(Registration::parse(Some("invite"), None).is_err());
+    assert_eq!(
+        Registration::parse(Some("invite"), Some(" ")).unwrap(),
+        Registration::Invite
+    );
+    assert!(Registration::parse(Some("sometimes"), None).is_err());
+}
+
+#[test]
+fn the_old_allowlist_fails_startup_pointing_to_invite() {
+    for (mode, list) in [
+        (Some("allowlist"), None),
+        (Some("allowlist"), Some("a@example.org")),
+        (Some("invite"), Some("a@example.org")),
+    ] {
+        let e = Registration::parse(mode, list).unwrap_err().to_string();
+        assert!(e.contains("COMMONS_REGISTRATION=invite"), "{e}");
+    }
 }

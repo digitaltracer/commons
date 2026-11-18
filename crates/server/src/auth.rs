@@ -198,19 +198,22 @@ fn normalise_email(email: &str) -> ApiResult<String> {
     Ok(e)
 }
 
-fn check_registration(rule: &Registration, email: &str) -> ApiResult<()> {
-    match rule {
-        Registration::Open => Ok(()),
-        Registration::Closed => Err(ApiError::Refused(
-            "registration_closed",
-            "registration is closed on this server".into(),
-        )),
-        Registration::Allowlist(emails) if emails.iter().any(|e| e == email) => Ok(()),
-        Registration::Allowlist(_) => Err(ApiError::Refused(
-            "registration_not_allowed",
-            "this email is not on this server's registration list".into(),
-        )),
+/// In invite mode, an account without an invite is allowed only as the server's first, so a
+/// fresh install can start. Concurrent first registrations are serialized.
+async fn check_bootstrap(conn: &mut sqlx::PgConnection) -> ApiResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('commons:first-account', 0))")
+        .execute(&mut *conn)
+        .await?;
+    let empty: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM users)")
+        .fetch_one(&mut *conn)
+        .await?;
+    if !empty {
+        return Err(ApiError::Refused(
+            "invite_required",
+            "this server needs an invite link to create an account".into(),
+        ));
     }
+    Ok(())
 }
 
 fn check_password(p: &str) -> ApiResult<()> {
@@ -222,12 +225,12 @@ fn check_password(p: &str) -> ApiResult<()> {
     Ok(())
 }
 
-async fn create_session(pool: &sqlx::PgPool, user_id: Uuid) -> ApiResult<String> {
+async fn create_session(conn: &mut sqlx::PgConnection, user_id: Uuid) -> ApiResult<String> {
     let token = new_token();
     sqlx::query("INSERT INTO sessions (token_hash, user_id) VALUES ($1, $2)")
         .bind(&hash_token(&token)[..])
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     Ok(token)
 }
@@ -235,15 +238,20 @@ async fn create_session(pool: &sqlx::PgPool, user_id: Uuid) -> ApiResult<String>
 #[utoipa::path(post, path = "/v1/auth/register", request_body = RegisterRequest,
     responses(
         (status = 200, body = SessionResponse),
-        (status = 403, description = "registration is closed, or the email is not allowed",
-            body = proto::api::ErrorBody),
+        (status = 403, description = "registration is closed, or an invite is required, \
+            invalid, expired, used or revoked", body = proto::api::ErrorBody),
     ))]
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
     let email = normalise_email(&req.email)?;
-    check_registration(&state.config.registration, &email)?;
+    if state.config.registration == Registration::Closed {
+        return Err(ApiError::Refused(
+            "registration_closed",
+            "registration is closed on this server".into(),
+        ));
+    }
     check_password(&req.password)?;
     let name = req.display_name.trim();
     if name.is_empty() || name.len() > 80 {
@@ -254,6 +262,15 @@ pub async fn register(
         .await
         .map_err(|e| ApiError::Internal(e.into()))??;
     let id = Uuid::now_v7();
+    // One transaction: the account, its session and, with an invite, its workspace.
+    let mut tx = state.pool.begin().await?;
+    let invite = match req.invite.as_deref().filter(|t| !t.trim().is_empty()) {
+        Some(raw) => Some(crate::invites::prepare(&mut tx, raw).await?),
+        None => None,
+    };
+    if invite.is_none() && state.config.registration == Registration::Invite {
+        check_bootstrap(&mut tx).await?;
+    }
     let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)
          ON CONFLICT (email) DO NOTHING",
@@ -262,14 +279,18 @@ pub async fn register(
     .bind(&email)
     .bind(&hash)
     .bind(name)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     if inserted.rows_affected() == 0 {
         return Err(ApiError::Conflict(serde_json::json!({
             "error": "email_taken", "message": "an account with this email exists"
         })));
     }
-    let token = create_session(&state.pool, id).await?;
+    let token = create_session(&mut tx, id).await?;
+    if let Some(invite) = &invite {
+        crate::invites::redeem(&mut tx, invite, id).await?;
+    }
+    tx.commit().await?;
     Ok(Json(SessionResponse {
         token,
         user: User {
@@ -305,7 +326,7 @@ pub async fn login(
     if !ok {
         return Err(ApiError::Unauthorized);
     }
-    let token = create_session(&state.pool, id).await?;
+    let token = create_session(&mut *state.pool.acquire().await?, id).await?;
     Ok(Json(SessionResponse {
         token,
         user: User {

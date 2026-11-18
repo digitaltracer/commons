@@ -30,6 +30,9 @@ pub struct RegisterRequest {
     pub email: String,
     pub password: String,
     pub display_name: String,
+    /// An invite token or link. Required when the server's registration mode is `invite`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +72,54 @@ pub struct CreateWorkspace {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct WorkspaceList {
     pub workspaces: Vec<Workspace>,
+}
+
+/// Creates a single-use invite to a workspace. Owners and admins only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct CreateInvite {
+    /// `member` or `guest`.
+    pub role: Role,
+    /// Days until it expires: 1 to 30, 7 by default.
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct Invite {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub role: Role,
+    pub created_by: Uuid,
+    pub created_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub used_at_ms: Option<i64>,
+    pub used_by: Option<Uuid>,
+    pub revoked_at_ms: Option<i64>,
+}
+
+/// A new invite. The token is shown this once; the server keeps only its hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct InviteCreated {
+    pub invite: Invite,
+    pub token: String,
+    /// `<public_url>/invite/<token>`.
+    pub link: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct InviteList {
+    pub invites: Vec<Invite>,
+}
+
+/// Accepts an invite as the signed-in user: an invite token, or the whole link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AcceptInvite {
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

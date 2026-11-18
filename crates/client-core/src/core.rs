@@ -203,6 +203,7 @@ impl Core {
                         email: email.into(),
                         password: password.into(),
                         display_name: display_name.into(),
+                        invite: None,
                     }),
                     None,
                     None,

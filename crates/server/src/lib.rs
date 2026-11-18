@@ -13,6 +13,7 @@ pub mod feed;
 pub mod files;
 pub mod hub;
 pub mod idempotency;
+pub mod invites;
 pub mod jobs;
 pub mod mail;
 pub mod me;
@@ -95,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/openapi.json", get(openapi::serve))
         .merge(auth::routes())
         .merge(directory::routes())
+        .merge(invites::routes())
         .merge(conversations::routes())
         .merge(messages::routes())
         .merge(files::routes())
@@ -105,6 +107,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", post(health).get(health));
     Router::new()
         .nest("/v1", v1)
+        .route("/invite/{token}", get(invites::landing))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }

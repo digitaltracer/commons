@@ -43,7 +43,7 @@ openssl rand -hex 24   # paste as POSTGRES_PASSWORD
 Edit `deploy/.env`:
 - `POSTGRES_PASSWORD`: the generated value. Keep it URL-safe, because it goes into the database URL.
 - `COMMONS_PUBLIC_URL=https://commons.adarshnb.com`.
-- `COMMONS_REGISTRATION`: `open`, `closed` or `allowlist`. With `allowlist`, set `COMMONS_REGISTRATION_ALLOWLIST` to the comma-separated emails that may register. Refused registrations get a 403 with a message the desktop app shows.
+- `COMMONS_REGISTRATION`: `open`, `closed` or `invite` (the examples use `invite`). In invite mode an account needs an invite link, except the very first account on an empty server, so register yourself first. Refused registrations get a 403 with a message the desktop app shows. The old `allowlist` mode and `COMMONS_REGISTRATION_ALLOWLIST` are gone; if either is still set, `commonsd` stops at startup and says to use `invite`.
 - `COMMONS_MAX_FILE_BYTES=104857600` (100 MiB) and `COMMONS_USER_QUOTA_BYTES=2147483648` (2 GiB) for a test box. If you change the file limit, change `client_max_body_size` in the nginx site to match.
 - `COMMONS_SMTP_URL` is left empty, so **password-reset email is off**: reset requests are accepted and logged, but no email goes out and no link is kept. Set it, and `COMMONS_MAIL_FROM`, to turn reset on.
 - `COMMONS_TRUSTED_PROXIES`: login and reset are limited per email and per client IP. The client IP comes from nginx's `X-Real-IP` only when the connection is from loopback or a listed proxy. Under compose, nginx connects through the `edge` network's gateway, so list that address (`docker network inspect commons_edge`); otherwise every client shares one per-IP limit.
@@ -79,6 +79,14 @@ curl -fsS https://commons.adarshnb.com/v1/meta     # protocol and server version
 ```
 
 Then add the account in the desktop app with the server URL `https://commons.adarshnb.com`. A working socket shows as the account staying connected; nginx's access log shows `GET /v1/socket` with status 101.
+
+## Inviting people
+
+In invite mode, the first account registers without an invite. Create a workspace, then use **Invite people** in it (owners and admins). Pick member or guest and an expiry (7 days by default); the app creates a link, `https://commons.adarshnb.com/invite/<token>`, and copies it. Each link works once. Send it to one person:
+- someone new pastes it into **Add a server account**, which fills in the server, and creates their account, joining the workspace in the same step;
+- someone with an account on this server pastes it into **Join with an invite link** in the switcher.
+
+Opened in a browser, the link shows a page saying to paste it into the app. The token is shown only when the link is made; the server keeps its hash. Owners and admins list and revoke invites through `GET` and `DELETE /v1/workspaces/{id}/invites`.
 
 ## Upgrading
 

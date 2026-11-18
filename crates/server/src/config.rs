@@ -38,12 +38,12 @@ pub struct Config {
 }
 
 /// Who may create an account through `/v1/auth/register`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Registration {
     Open,
     Closed,
-    /// Normalised (trimmed, lowercased) emails.
-    Allowlist(Vec<String>),
+    /// Only with a valid invite, except the first account on an empty server.
+    Invite,
 }
 
 impl Default for Config {
@@ -120,26 +120,20 @@ impl Config {
 }
 
 impl Registration {
+    /// `allowlist` is the setting invites replaced; naming it fails startup with directions.
     pub fn parse(mode: Option<&str>, allowlist: Option<&str>) -> anyhow::Result<Self> {
+        let replaced = "the registration allowlist was replaced by invite links: set \
+            COMMONS_REGISTRATION=invite, remove COMMONS_REGISTRATION_ALLOWLIST, and invite \
+            people from a workspace";
+        anyhow::ensure!(allowlist.is_none_or(|a| a.trim().is_empty()), "{replaced}");
         match mode.map(str::trim) {
             None | Some("open") => Ok(Registration::Open),
             Some("closed") => Ok(Registration::Closed),
-            Some("allowlist") => {
-                let emails: Vec<String> = allowlist
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(|e| e.trim().to_lowercase())
-                    .filter(|e| !e.is_empty())
-                    .collect();
-                anyhow::ensure!(
-                    !emails.is_empty(),
-                    "COMMONS_REGISTRATION=allowlist needs COMMONS_REGISTRATION_ALLOWLIST"
-                );
-                Ok(Registration::Allowlist(emails))
+            Some("invite") => Ok(Registration::Invite),
+            Some("allowlist") => anyhow::bail!("{replaced}"),
+            Some(other) => {
+                anyhow::bail!("COMMONS_REGISTRATION must be open, closed or invite, not {other:?}")
             }
-            Some(other) => anyhow::bail!(
-                "COMMONS_REGISTRATION must be open, closed or allowlist, not {other:?}"
-            ),
         }
     }
 }
