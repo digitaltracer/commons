@@ -44,6 +44,7 @@ pub fn MessageList(
 ) -> impl IntoView {
     let rows: RwSignal<Vec<WindowRow>> = RwSignal::new(vec![]);
     let total = RwSignal::new(0u32);
+    let loaded = RwSignal::new(false);
     let client = StoredValue::new(WindowClient::new());
     let sub_id = StoredValue::new(None::<u64>);
     let offset = StoredValue::new(0u32);
@@ -100,6 +101,7 @@ pub fn MessageList(
                 }
                 rows.set(new_rows);
                 total.set(new_total);
+                loaded.set(true);
                 after_render();
                 ipc::command(
                     "ack_window",
@@ -206,9 +208,7 @@ pub fn MessageList(
         <div class="list" node_ref=scroller on:scroll=on_scroll role="log" aria-live="polite"
              aria-label=label tabindex="0">
             <div class="spacer"></div>
-            <Show when=move || rows.with(|r| r.is_empty())>
-                <p class="empty">"No messages yet."</p>
-            </Show>
+            {move || (loaded.get() && rows.with(|r| r.is_empty())).then(|| empty(account_id, conversation_id, thread_root_id))}
             <For each=shown key=|(r, d)| (r.key, r.version, d.clone()) let:item>
                 {item.1.map(|d| if d.is_empty() {
                     view! { <div class="tsep">{move || format!("{} {}", replies(), if replies() == 1 { "reply" } else { "replies" })}</div> }.into_any()
@@ -220,6 +220,36 @@ pub fn MessageList(
             </For>
         </div>
     }
+}
+
+/// An empty list. Away from the server, it says nothing is saved rather than that nothing exists.
+fn empty(account_id: Uuid, conversation_id: Uuid, thread_root_id: Option<Uuid>) -> AnyView {
+    let c = ctx();
+    let connection = c.connection(account_id);
+    if thread_root_id.is_some() || connection == ConnectionState::Online {
+        return view! { <p class="empty">"No messages yet."</p> }.into_any();
+    }
+    let title = c
+        .conversation(crate::state::Selection {
+            account_id,
+            conversation_id,
+        })
+        .map(|(_, cv)| cv.title)
+        .filter(|t| t.starts_with('#'))
+        .unwrap_or_else(|| "this conversation".into());
+    let then = if connection == ConnectionState::SignedOut {
+        "Its messages load after you sign in."
+    } else {
+        "Its messages load when Commons reconnects."
+    };
+    view! {
+        <div class="emptyst">
+            <span class="emptyico">{sized(Icon::Compose, 22)}</span>
+            <h2>{format!("Nothing from {title} is saved on this Mac")}</h2>
+            <p>{then}</p>
+        </div>
+    }
+    .into_any()
 }
 
 #[component]
@@ -249,7 +279,9 @@ fn Message(
                         {sized(Icon::Clock, 14)}
                         {move || if offline() {
                             view! {
-                                <span>"Waiting to send. It goes out once when you reconnect."</span>
+                                <span>{move || if c.connection(account_id) == ConnectionState::SignedOut {
+                                    "Waiting to send. It goes out after you sign in."
+                                } else { "Waiting to send. It goes out once when you reconnect." }}</span>
                                 <button class="plink" on:click={
                                     let body = body.clone();
                                     move |_| {
@@ -697,7 +729,11 @@ pub fn Composer(
             <div class="cwrap">
                 <label class="visually-hidden" for=id.clone()>{label.clone()}</label>
                 <textarea id=id class="ctext" node_ref=area rows=rows
-                    placeholder=move || if offline() { format!("{placeholder2}. Sends when you're back online") } else { placeholder2.clone() }
+                    placeholder=move || match c.connection(account_id) {
+                        ConnectionState::Online => placeholder2.clone(),
+                        ConnectionState::SignedOut => format!("{placeholder2}. Sends after you sign in"),
+                        _ => format!("{placeholder2}. Sends when you're back online"),
+                    }
                     aria-autocomplete="list" aria-expanded=move || (!suggestions().is_empty()).to_string()
                     prop:value=move || text.get()
                     on:input=move |ev| {
@@ -771,7 +807,8 @@ pub fn Composer(
                     </Show>
                 </span>
                 {move || attaching.get().then(|| view! { <span class="hint">"Uploading…"</span> })}
-                <span class="hint">{move || if offline() { "Offline · messages wait in your outbox" }
+                <span class="hint">{move || if c.connection(account_id) == ConnectionState::SignedOut { "Signed out · messages wait in your outbox" }
+                    else if offline() { "Offline · messages wait in your outbox" }
                     else if full { "Markdown · Return to send · Shift-Return for a new line" } else { "" }}</span>
                 <button type="button" class="sendbtn" aria-label=move || if offline() { "Queue message" } else { "Send" }
                     on:click=move |_| send()>{icon(Icon::Send)}</button>

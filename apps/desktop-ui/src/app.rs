@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use crate::ipc;
 use crate::messages::{Composer, EditBar, MessageList};
-use crate::panels::{InvitePeople, JoinInvite, Members, Person, Prefs, SignInAgain, Tools};
+use crate::panels::{
+    InvitePeople, JoinInvite, Members, Person, Prefs, SESSION_PASSWORD, SessionCard, SignInAgain,
+    Tools,
+};
 use crate::search::SearchView;
 use crate::spike;
 use crate::state::{Aside, Ctx, Mode, Overlay, Place, Selection, ctx, is_dm};
@@ -250,13 +253,13 @@ fn Rail() -> impl IntoView {
                         if off { label.push_str(", reconnecting"); }
                         if out { label.push_str(", signed out"); }
                         view! {
-                            <button class="ws" class:on=current class:dim=out style=format!("background: {}", ui::color(wid))
+                            <button class="ws" class:on=current class:out=out style=format!("background: {}", ui::color(wid))
                                 aria-label=move || if current() { format!("{label}, current") } else { label.clone() }
                                 aria-expanded=move || (current() && c.overlay.get() == Overlay::Switcher).to_string()
                                 on:click=move |_| if current() { c.overlay.set(Overlay::Switcher) } else { c.go_to_workspace(account_id, Some(wid)) }>
-                                {ui::tile(&w.name)}
+                                <span class="wt">{ui::tile(&w.name)}</span>
                                 {if out {
-                                    Some(view! { <span class="walert">{sized(Icon::Alert, 11)}</span> }.into_any())
+                                    Some(view! { <span class="wlock">{sized(Icon::Lock, 10)}</span> }.into_any())
                                 } else if off {
                                     Some(view! { <span class="woff">{sized(Icon::Refresh, 11)}</span> }.into_any())
                                 } else if mentions > 0 {
@@ -356,6 +359,7 @@ fn Side() -> impl IntoView {
                 let pending: u32 = a.workspaces.iter().flat_map(|w| &w.conversations).map(|cv| cv.pending).sum();
                 let (status, dot) = match a.connection {
                     ConnectionState::Online => ("Active".to_string(), "online"),
+                    ConnectionState::SignedOut if pending > 0 => (format!("Signed out · {pending} {} waiting to send", if pending == 1 { "message" } else { "messages" }), "out"),
                     ConnectionState::SignedOut => ("Signed out".to_string(), "out"),
                     _ if pending > 0 => (format!("Offline · {pending} {} waiting to send", if pending == 1 { "message" } else { "messages" }), "off"),
                     ConnectionState::Connecting => ("Connecting…".to_string(), "off"),
@@ -425,7 +429,8 @@ fn Side() -> impl IntoView {
                         {avatar(a.user_id, &a.display_name, "m")}
                         <div style="flex: 1; min-width: 0">
                             <div class="fname2">{a.display_name.clone()}</div>
-                            <div class="fstat"><span class=format!("dot {dot}")></span>{status}</div>
+                            <div class="fstat">{if dot == "out" { sized(Icon::Lock, 11).into_any() } else {
+                                view! { <span class=format!("dot {dot}")></span> }.into_any() }}{status}</div>
                         </div>
                         <button class="iconbtn" aria-label="Notification preferences"
                             on:click=move |_| c.overlay.set(Overlay::Prefs(account_id))>{icon(Icon::Bell)}</button>
@@ -446,7 +451,7 @@ fn Empty() -> impl IntoView {
     }
 }
 
-/// The reconnecting or signed-out banner for the open conversation's account.
+/// The reconnecting banner for the open conversation's account. Signed out shows a card instead.
 #[component]
 fn Banner(account_id: Uuid) -> impl IntoView {
     let c = ctx();
@@ -455,18 +460,16 @@ fn Banner(account_id: Uuid) -> impl IntoView {
         let host = ui::host(&a.server_url);
         Some(match a.connection {
             ConnectionState::Online => return None,
-            ConnectionState::SignedOut => view! {
-                <div class="banner" role="status">
-                    {icon(Icon::Alert)}
-                    <span style="flex: 1"><strong>{format!("Your session on {host} ended.")}</strong>
-                        " You're reading saved messages. Sign in again to send and receive."</span>
-                    <button class="bbtn" on:click=move |_| c.overlay.set(Overlay::SignInAgain(account_id))>"Sign in"</button>
-                </div>
-            }.into_any(),
+            ConnectionState::SignedOut => return None,
             _ => {
-                let wait = a.reconnect_at_ms.map(|at| ((at as f64 - c.now.get()) / 1000.0).ceil().max(0.0) as i64);
+                let wait = a
+                    .reconnect_at_ms
+                    .map(|at| ((at as f64 - c.now.get()) / 1000.0).ceil().max(0.0) as i64);
                 let when = match wait {
-                    Some(s) if s > 0 => format!("Reconnecting in {s} {}.", if s == 1 { "second" } else { "seconds" }),
+                    Some(s) if s > 0 => format!(
+                        "Reconnecting in {s} {}.",
+                        if s == 1 { "second" } else { "seconds" }
+                    ),
                     _ => "Reconnecting now.".to_string(),
                 };
                 view! {
@@ -567,6 +570,14 @@ fn Conversation(sel: Selection) -> impl IntoView {
                 <span class="hicon">{head_icon}</span>
                 <h1>{move || title().trim_start_matches('#').to_string()}</h1>
                 <div class="hsub">{sub}</div>
+                {move || (c.connection(sel.account_id) == ConnectionState::SignedOut).then(|| view! {
+                    <button class="outpill" aria-label="Signed out. Go to sign in" on:click=move |_| {
+                        if let Some(el) = document().get_element_by_id(SESSION_PASSWORD)
+                            .and_then(|e| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(e).ok()) {
+                            let _ = el.focus();
+                        }
+                    }>{sized(Icon::Lock, 12)}"Signed out"</button>
+                })}
                 <button class="iconbtn" aria-pressed=move || muted().to_string()
                     aria-label=move || if muted() { "Unmute notifications" } else { "Mute notifications" }
                     title=move || if muted() { "Muted: only mentions notify" } else { "Mute" }
@@ -592,6 +603,7 @@ fn Conversation(sel: Selection) -> impl IntoView {
             {drafts}
             <MessageList account_id=sel.account_id conversation_id=sel.conversation_id label=list_label />
             <EditBar account_id=sel.account_id conversation_id=sel.conversation_id />
+            <SessionCard account_id=sel.account_id />
             <Composer account_id=sel.account_id conversation_id=sel.conversation_id
                 label=message_label.clone() placeholder=message_label />
             <div class="typing" aria-live="polite">{move || {

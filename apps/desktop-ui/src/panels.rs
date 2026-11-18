@@ -1,6 +1,7 @@
 //! Side panels and dialogs: members, notification preferences, people, channel tools.
 use leptos::prelude::*;
 use proto::model::{Conversation, ConversationKind, Member, NotifyLevel, Preferences, Role};
+use proto::view::{AccountView, ConnectionState, SessionEnd};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -494,42 +495,251 @@ pub fn Tools(account_id: Uuid, workspace_id: Uuid, which: Overlay) -> impl IntoV
     }
 }
 
-/// Signs an account whose session ended back in, keeping its cache.
+/// What the signed-out sign-in UI shows for an account; None while it is signed in.
+#[derive(Clone, PartialEq)]
+struct SignedOut {
+    host: String,
+    reason: String,
+}
+
+fn signed_out(a: &AccountView) -> Option<SignedOut> {
+    if a.connection != ConnectionState::SignedOut {
+        return None;
+    }
+    let host = ui::host(&a.server_url);
+    let reason = match a.session_end {
+        Some(SessionEnd::NoToken) => format!("This Mac has no saved sign-in for {}.", a.email),
+        _ => format!("{host} ended this Mac's session, for example after a password reset."),
+    };
+    Some(SignedOut { host, reason })
+}
+
+/// Messages in the account's outbox.
+fn waiting(a: &AccountView) -> u32 {
+    a.workspaces
+        .iter()
+        .flat_map(|w| &w.conversations)
+        .map(|cv| cv.pending)
+        .sum()
+}
+
+fn messages(n: u32) -> String {
+    format!("{n} {}", if n == 1 { "message" } else { "messages" })
+}
+
+/// Signs the account out and removes it from this Mac, with a notice if the server could
+/// not be told.
+pub fn remove_account(account_id: Uuid, host: String) {
+    let c = ctx();
+    leptos::task::spawn_local(async move {
+        match ipc::invoke::<bool>("remove_account", json!({"accountId": account_id})).await {
+            Ok(true) => {}
+            Ok(false) => c.notice.set(Some(format!(
+                "Removed from this Mac, but {host} could not be reached to end the session. It may still be active on the server."))),
+            Err(e) => ipc::warn(format!("remove_account: {e}")),
+        }
+    });
+}
+
+/// Sends the password; on failure, the error is worded for the person signing in.
+fn sign_in(
+    account_id: Uuid,
+    password: RwSignal<String>,
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    done: impl Fn() + 'static,
+) {
+    if busy.get_untracked() {
+        return;
+    }
+    busy.set(true);
+    error.set(None);
+    leptos::task::spawn_local(async move {
+        let args = json!({"accountId": account_id, "password": password.get_untracked()});
+        match ipc::invoke::<serde_json::Value>("sign_in_again", args).await {
+            Ok(_) => {
+                password.set(String::new());
+                done();
+            }
+            Err(e) => error.set(Some(e)),
+        }
+        busy.set(false);
+    });
+}
+
+/// Focuses the element each time it is mounted; `autofocus` only applies on page load.
+fn focus_when_mounted<E>(node: NodeRef<E>)
+where
+    E: leptos::html::ElementType,
+    E::Output: wasm_bindgen::JsCast + Clone + 'static,
+{
+    Effect::new(move |_| {
+        if let Some(el) = node.get() {
+            let _ = wasm_bindgen::JsCast::unchecked_ref::<web_sys::HtmlElement>(&el).focus();
+        }
+    });
+}
+
+/// The id of the signed-out card's password field, which the header's "Signed out" button focuses.
+pub const SESSION_PASSWORD: &str = "session-password";
+
+/// The sign-in card docked above the composer while the account is signed out.
+#[component]
+pub fn SessionCard(account_id: Uuid) -> impl IntoView {
+    let c = ctx();
+    let password = RwSignal::new(String::new());
+    let error = RwSignal::new(None::<String>);
+    let busy = RwSignal::new(false);
+    let confirm = RwSignal::new(false);
+    let cancel = NodeRef::<leptos::html::Button>::new();
+    focus_when_mounted(cancel);
+    let info = Memo::new(move |_| c.account(account_id).as_ref().and_then(signed_out));
+    let pending = Memo::new(move |_| c.account(account_id).map(|a| waiting(&a)).unwrap_or(0));
+    move || {
+        let s = info.get()?;
+        let host = s.host.clone();
+        Some(if confirm.get() {
+            let gone = host.clone();
+            view! {
+                <section class="sess" aria-labelledby="sess-title">
+                    <span class="lockchip danger">{sized(Icon::Trash, 17)}</span>
+                    <div class="sess-b">
+                        <div>
+                            <h2 class="sess-t" id="sess-title">{format!("Remove {host} from this Mac?")}</h2>
+                            <p class="sess-d">{move || match pending.get() {
+                                0 => "This deletes its saved messages here.".to_string(),
+                                n => format!("This deletes its saved messages here, and {} that {} been sent.",
+                                    messages(n), if n == 1 { "hasn't" } else { "haven't" }),
+                            }}{format!(" Your account on {host} isn't affected.")}</p>
+                        </div>
+                        <div class="sess-f">
+                            <button class="btn danger" on:click=move |_| remove_account(account_id, gone.clone())>"Remove"</button>
+                            <button class="btn" node_ref=cancel on:click=move |_| confirm.set(false)>"Cancel"</button>
+                        </div>
+                    </div>
+                </section>
+            }.into_any()
+        } else {
+            view! {
+                <section class="sess" aria-labelledby="sess-title" aria-busy=move || busy.get().to_string()>
+                    <span class="lockchip">{sized(Icon::Lock, 17)}</span>
+                    <div class="sess-b">
+                        <div>
+                            <h2 class="sess-t" id="sess-title">{format!("You're signed out of {host}")}</h2>
+                            <p class="sess-d">{s.reason.clone()}" Sign in again to get new messages and send."</p>
+                        </div>
+                        <div class="can">
+                            <span>{sized(Icon::Check, 13)}"Messages saved on this Mac stay readable"</span>
+                            {move || (pending.get() > 0).then(|| view! {
+                                <span>{sized(Icon::Clock, 13)}{format!("{} {} in your outbox", messages(pending.get()),
+                                    if pending.get() == 1 { "waits" } else { "wait" })}</span>
+                            })}
+                        </div>
+                        <form class="sess-f" on:submit=move |ev| {
+                            ev.prevent_default();
+                            sign_in(account_id, password, busy, error, || {});
+                        }>
+                            <label class="flab">"Password"
+                                <input class="field" id=SESSION_PASSWORD type="password" required autocomplete="current-password"
+                                    readonly=move || busy.get()
+                                    class:bad=move || error.with(|e| e.is_some())
+                                    aria-invalid=move || error.with(|e| e.is_some()).to_string()
+                                    aria-describedby="sess-err"
+                                    prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) /></label>
+                            <button type="submit" class="btn primary" disabled=move || busy.get()>
+                                {move || if busy.get() { "Signing in…" } else { "Sign in" }}</button>
+                            <button type="button" class="qbtn" on:click=move |_| confirm.set(true)>"Remove from this Mac…"</button>
+                        </form>
+                        {move || error.get().map(|e| view! {
+                            <p class="serr" id="sess-err" role="alert">{sized(Icon::Info, 14)}{e}</p>
+                        })}
+                    </div>
+                </section>
+            }.into_any()
+        })
+    }
+}
+
+/// The sign-in sheet for a signed-out account, opened from the switcher.
 #[component]
 pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
     let c = ctx();
     let password = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
+    let confirm = RwSignal::new(false);
+    let password_field = NodeRef::<leptos::html::Input>::new();
+    let cancel = NodeRef::<leptos::html::Button>::new();
+    focus_when_mounted(password_field);
+    focus_when_mounted(cancel);
     let a = c.account(account_id);
+    let s = a.as_ref().and_then(signed_out);
+    let pending = a.as_ref().map(waiting).unwrap_or(0);
     let host = a
         .as_ref()
         .map(|a| ui::host(&a.server_url))
         .unwrap_or_default();
     let email = a.map(|a| a.email).unwrap_or_default();
+    let reason = s.map(|s| s.reason).unwrap_or_default();
+    let kept = match pending {
+        0 => "Saved messages and drafts stay on this Mac.".to_string(),
+        n => format!(
+            "Saved messages, drafts and {} waiting to send stay on this Mac.",
+            messages(n)
+        ),
+    };
+    let gone = host.clone();
+    let removing = match pending {
+        0 => {
+            format!("This deletes its saved messages here. Your account on {host} isn't affected.")
+        }
+        n => format!(
+            "This deletes its saved messages here, and {} that {} been sent. Your account on {host} isn't affected.",
+            messages(n),
+            if n == 1 { "hasn't" } else { "haven't" }
+        ),
+    };
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        busy.set(true);
-        leptos::task::spawn_local(async move {
-            let args = json!({"accountId": account_id, "password": password.get_untracked()});
-            match ipc::invoke::<serde_json::Value>("sign_in_again", args).await {
-                Ok(_) => c.overlay.set(Overlay::None),
-                Err(e) => error.set(Some(e)),
-            }
-            busy.set(false);
+        sign_in(account_id, password, busy, error, move || {
+            c.overlay.set(Overlay::None)
         });
     };
     view! {
         <Dialog label=format!("Sign in to {host}")>
             <form on:submit=submit>
                 <div class="dbody">
-                    <p class="muted">"Your session on this server ended. Your saved messages and anything waiting to send are kept."</p>
-                    <label class="flabel">"Email"<input class="field" type="email" readonly prop:value=email /></label>
-                    <label class="flabel">"Password"<input class="field" type="password" required autofocus autocomplete="current-password"
+                    <p class="muted" style="margin: 0">{reason}</p>
+                    <label class="flabel">"Email"<input class="field" type="email" readonly autocomplete="username" prop:value=email /></label>
+                    <label class="flabel">"Password"<input class="field" type="password" required autocomplete="current-password"
+                        readonly=move || busy.get() node_ref=password_field
+                        aria-invalid=move || error.with(|e| e.is_some()).to_string()
                         prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) /></label>
                     {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
+                    <div class="kept">{sized(Icon::Check, 14)}<span>{kept}</span></div>
                 </div>
-                <footer class="dfoot"><button type="submit" class="btn primary" disabled=move || busy.get()>"Sign in"</button></footer>
+                {move || if confirm.get() {
+                    let gone = gone.clone();
+                    view! {
+                        <footer class="dfoot" role="group" aria-label="Remove from this Mac?">
+                            <span class="muted">{removing.clone()}</span>
+                            <button type="button" class="btn" node_ref=cancel on:click=move |_| confirm.set(false)>"Cancel"</button>
+                            <button type="button" class="btn danger" on:click=move |_| {
+                                c.overlay.set(Overlay::None);
+                                remove_account(account_id, gone.clone());
+                            }>"Remove"</button>
+                        </footer>
+                    }.into_any()
+                } else {
+                    view! {
+                        <footer class="dfoot">
+                            <button type="button" class="btn danger" style="margin-right: auto" on:click=move |_| confirm.set(true)>"Remove from this Mac…"</button>
+                            <button type="button" class="btn" on:click=move |_| c.overlay.set(Overlay::None)>"Cancel"</button>
+                            <button type="submit" class="btn primary" disabled=move || busy.get()>
+                                {move || if busy.get() { "Signing in…" } else { "Sign in" }}</button>
+                        </footer>
+                    }.into_any()
+                }}
             </form>
         </Dialog>
     }

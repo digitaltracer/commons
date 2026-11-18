@@ -1,9 +1,10 @@
 //! The accounts and workspaces switcher, opened from the current workspace.
 use leptos::prelude::*;
-use proto::view::{AccountView, ConnectionState};
+use proto::view::{AccountView, ConnectionState, SessionEnd};
 use serde_json::json;
 
 use crate::ipc;
+use crate::panels::remove_account;
 use crate::state::{Overlay, ctx};
 use crate::ui::{self, Icon, icon, sized};
 
@@ -31,6 +32,10 @@ pub fn Switcher() -> impl IntoView {
         let server_host = StoredValue::new(ui::host(&a.server_url));
         let (status, dot) = status_label(&a);
         let signed_out = a.connection == ConnectionState::SignedOut;
+        let ended = match a.session_end {
+            Some(SessionEnd::NoToken) => "No saved sign-in on this Mac.",
+            _ => "The server ended this Mac's session.",
+        };
         let f = find.get().to_lowercase();
         let rows = a
             .workspaces
@@ -47,7 +52,7 @@ pub fn Switcher() -> impl IntoView {
                     <button class="wrow" class:cur=current aria-current=move || current().to_string()
                         on:click=move |_| { close(); c.go_to_workspace(account_id, Some(wid)); }>
                         <span class="ws sm" style=format!("background: {}", ui::color(wid))>{ui::tile(&w.name)}</span>
-                        <span class="wn">{w.name.clone()}</span>
+                        <span class="wn">{w.name.clone()}{signed_out.then(|| view! { <span class="wsub">" · saved copy"</span> })}</span>
                         {move || current().then(|| view! { <span class="cur-ic" role="img" aria-label="Current workspace">{icon(Icon::Check)}</span> })}
                         {if mentions > 0 {
                             Some(view! { <span class="cnt" aria-label=format!("{mentions} mentions")>{mentions}</span> }.into_any())
@@ -68,13 +73,13 @@ pub fn Switcher() -> impl IntoView {
                         <div class="adom">{host}</div>
                         <div class="aid">{format!("{} · email and password", a.display_name)}</div>
                     </div>
-                    <span class="stat"><span class=format!("dot {dot}")></span>{status}</span>
+                    <span class="stat">{if signed_out { sized(Icon::Lock, 11).into_any() } else {
+                        view! { <span class=format!("dot {dot}")></span> }.into_any() }}{status}</span>
                 </div>
                 {signed_out.then(|| view! {
                     <div class="signin">
-                        {icon(Icon::Info)}
-                        <span style="flex: 1">"Your session on this server ended. Sign in again to see its workspaces."</span>
-                        <button class="sbtn" on:click=move |_| c.overlay.set(Overlay::SignInAgain(account_id))>"Sign in"</button>
+                        <span style="flex: 1">{ended}" You can still read what's saved here; sending waits until you sign in."</span>
+                        <button class="sbtn" on:click=move |_| c.overlay.set(Overlay::SignInAgain(account_id))>"Sign in…"</button>
                     </div>
                 })}
                 {rows}
@@ -102,15 +107,7 @@ pub fn Switcher() -> impl IntoView {
                     <div class="manage">
                         <button class="btn danger" on:click=move |_| {
                             close();
-                            let host = server_host.get_value();
-                            leptos::task::spawn_local(async move {
-                                match ipc::invoke::<bool>("remove_account", json!({"accountId": account_id})).await {
-                                    Ok(true) => {}
-                                    Ok(false) => c.notice.set(Some(format!(
-                                        "Removed from this Mac, but {host} could not be reached to end the session. It may still be active on the server."))),
-                                    Err(e) => ipc::warn(format!("remove_account: {e}")),
-                                }
-                            });
+                            remove_account(account_id, server_host.get_value());
                         }>"Sign out and remove from this Mac"</button>
                     </div>
                 </Show>
