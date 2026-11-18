@@ -14,11 +14,13 @@ use uuid::Uuid;
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::hub::{self, Ephemeral, Wakeup};
-use crate::{AppState, conversations, sync};
+use crate::{AppState, sync};
 
 const PAGE: i64 = 200;
 /// Queued feed batches filtered together, at most.
 const CHAIN: usize = 8;
+/// A connection relays at most one typing frame per conversation in this period.
+const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub async fn upgrade(
     State(state): State<AppState>,
@@ -44,6 +46,7 @@ struct Session {
     /// Access as of each workspace cursor, once the socket has caught up with the feed.
     access: HashMap<Uuid, crate::feed::Access>,
     user_since: i64,
+    typing_sent: HashMap<Uuid, tokio::time::Instant>,
 }
 
 impl Session {
@@ -227,6 +230,15 @@ impl Session {
         Ok(())
     }
 
+    /// The workspace in which this socket can read `conversation_id` now, from its
+    /// in-memory access state; `None` while it is behind or cannot read it.
+    fn reads(&self, conversation_id: Uuid) -> Option<Uuid> {
+        self.access
+            .iter()
+            .find(|(_, a)| a.active && a.open.contains(&conversation_id))
+            .map(|(w, _)| *w)
+    }
+
     async fn ephemeral(&mut self, e: Ephemeral) -> Result<(), Stop> {
         if !self.workspaces.contains_key(&e.workspace_id) {
             return Ok(());
@@ -236,37 +248,27 @@ impl Session {
             user_id,
             ..
         } = &e.frame
+            && (*user_id == self.user_id || self.reads(*conversation_id) != Some(e.workspace_id))
         {
-            if *user_id == self.user_id {
-                return Ok(());
-            }
-            let Ok(mut conn) = self.state.pool.acquire().await else {
-                return Ok(());
-            };
-            if !conversations::can_read_now(&mut conn, *conversation_id, self.user_id).await {
-                return Ok(());
-            }
+            return Ok(());
         }
         self.send(&e.frame).await
     }
 
     async fn client_frame(&mut self, frame: ClientFrame) {
         if let ClientFrame::Typing { conversation_id } = frame {
-            let Ok(mut conn) = self.state.pool.acquire().await else {
+            let Some(workspace_id) = self.reads(conversation_id) else {
                 return;
             };
-            if !conversations::can_read_now(&mut conn, conversation_id, self.user_id).await {
+            let now = tokio::time::Instant::now();
+            if self
+                .typing_sent
+                .get(&conversation_id)
+                .is_some_and(|t| now.duration_since(*t) < TYPING_EVERY)
+            {
                 return;
             }
-            let Ok(workspace_id) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT workspace_id FROM conversations WHERE id = $1",
-            )
-            .bind(conversation_id)
-            .fetch_one(&mut *conn)
-            .await
-            else {
-                return;
-            };
+            self.typing_sent.insert(conversation_id, now);
             hub::publish_ephemeral(
                 &self.state.pool,
                 &Ephemeral {
@@ -327,6 +329,7 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
             .collect(),
         user_since,
         access: HashMap::new(),
+        typing_sent: HashMap::new(),
     };
     let ws_ids: Vec<Uuid> = session.workspaces.keys().copied().collect();
     state.hub.set_workspaces(reg.id, ws_ids.clone());
