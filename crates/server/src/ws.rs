@@ -331,15 +331,20 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         access: HashMap::new(),
         typing_sent: HashMap::new(),
     };
-    let ws_ids: Vec<Uuid> = session.workspaces.keys().copied().collect();
-    state.hub.set_workspaces(reg.id, ws_ids.clone());
-    if state.hub.connections(user_id) == 1 {
-        publish_presence(&state, user_id, &ws_ids, true).await;
-    }
     let mut repair = tokio::time::interval(state.config.repair_interval);
     let mut pending: Option<Wakeup> = None;
+    let mut ws_ids: Vec<Uuid> = vec![];
     let result: Result<(), Stop> = async {
+        // The hello's workspaces are claims: register and announce only those that pass
+        // the first replay's access check, then replay again to cover the gap before
+        // wakeups started.
         session.drain_all().await?;
+        ws_ids = session.workspaces.keys().copied().collect();
+        state.hub.set_workspaces(reg.id, ws_ids.clone());
+        session.drain_all().await?;
+        if state.hub.connections(user_id) == 1 {
+            publish_presence(&state, user_id, &ws_ids, true).await;
+        }
         loop {
             let mut before: Vec<Uuid> = session.workspaces.keys().copied().collect();
             before.sort();
