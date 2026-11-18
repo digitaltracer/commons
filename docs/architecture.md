@@ -437,3 +437,48 @@ A third implementer finished the v1 desktop UI on `736c7a5`, against the mockup 
 - A deleted message is dropped from the window, so the tombstone row never shows.
 - Search opens the conversation but doesn't scroll to the hit.
 - Thumbnails are not cached for offline use.
+
+## As built, deployment slice (2026-11-18)
+
+A fourth implementer pulled part of step 6 forward on `ec1094c`, so the server can run at `https://commons.adarshnb.com` and the desktop app can talk to it. This box is shared with live sites, and its nginx and certbot already own ports 80 and 443.
+
+**Built**
+- **Registration gate.** `COMMONS_REGISTRATION` is `open` (the default, so dev and tests are unchanged), `closed` or `allowlist`. In allowlist mode, `COMMONS_REGISTRATION_ALLOWLIST` is a comma-separated list, trimmed and lowercased like the server's email normalisation. A refusal is a 403 with `registration_closed` or `registration_not_allowed` and a message, which the desktop app shows as given (a new `ApiError::Refused`). `crates/server/tests/registration.rs` covers each mode and the parsing.
+- **`Dockerfile`.** A release `commonsd` built on `rust:1.99.1-trixie`. The runtime is `debian:trixie-slim` (46 MB), running as uid 10001 with `STOPSIGNAL SIGINT`, because `commonsd` shuts down gracefully only on ctrl-c. Cargo builds only `server`, `proto` and their dependencies. It downloads the server's optional test crates but does not compile them.
+- **`deploy/compose.yaml`.** Postgres 16-alpine sits on an internal-only network with a named volume and no ports. `commonsd` publishes `127.0.0.1:8090` only, keeps files in a named volume, and starts once Postgres is healthy. Each service gets 1 vCPU and 2 GB, and logs rotate at 10 MB × 5.
+- **`deploy/nginx/commons.adarshnb.com.conf`.** A plain port-80 block for `certbot --nginx`. It proxies `/v1/socket` as a WebSocket with 1 h timeouts. It sets `client_max_body_size 100m`, the same as `COMMONS_MAX_FILE_BYTES=104857600`, and `proxy_request_buffering off`.
+- **Test-box limits.** 100 MiB per file and 2 GiB per user. SMTP is unset, so password-reset email is off.
+- **`docs/deploy.md`.** Runbooks for both paths.
+
+**Change from the user during the build.** On this VPS, Commons runs **without Docker**. It runs as a systemd service against the host's PostgreSQL 16 on `127.0.0.1:5433`, with its own `commons` role and database. The compose stack stays as the plan's self-host path. Added for this:
+- `deploy/systemd/commonsd.service`: the `commons` user, `EnvironmentFile=/etc/commons/commonsd.env` and `StateDirectory=commons`. It also sets `Restart=always`, `CPUQuota=200%` and `MemoryMax=4G`, with hardening (`ProtectSystem=strict` and `ReadWritePaths=/var/lib/commons`, among others) and `KillSignal=SIGINT`.
+- `deploy/systemd/commonsd-env.example`.
+- The runbook section "systemd on an existing host".
+
+**Checked on this Mac**
+- `docker build --platform linux/amd64` passed; the release compile took 5 min 18 s under emulation.
+- The compose stack came up with a throwaway env, and both services were healthy in 15 s.
+  - `/v1/health` returned `ok`.
+  - In allowlist mode, a listed email registered (200) and an unlisted one got 403.
+  - The files volume was writable by uid 10001.
+  - `docker compose stop` took 0.3 s, which is the SIGINT shutdown.
+  - Everything was removed afterwards.
+- `nginx -t` passed in `nginx:stable`, with the site in `conf.d`.
+- `systemd-analyze verify` passed on the unit in `ubuntu:24.04`.
+- CI passed: fmt, both clippy runs, check-deps, and `cargo test --workspace` (72 tests).
+
+**Deviations and choices**
+- No Caddy, against decision 19. TLS ends at the host's nginx, and LAN mode and first-run setup are still step 6.
+- **Env files.**
+  - The examples are named `deploy/env.example` and `deploy/systemd/commonsd-env.example`, not `*.env.example`, because a local policy hook blocks shell commands that name `.env` files.
+  - Compose reads `deploy/.env` for `${…}` interpolation only, and the compose file passes each variable on explicitly.
+  - The stack fixes `COMMONS_DATABASE_URL`, `COMMONS_BIND` and `COMMONS_FILES_DIR`.
+  - S3 (`COMMONS_S3_BUCKET` and `AWS_*`) is not wired into compose, because files use the volume. The systemd example lists it.
+- In allowlist mode, an empty list fails startup instead of refusing everyone. An unknown mode also fails startup.
+- The compose service pins `platform: linux/amd64`.
+
+**Not done, or not verified**
+- Nothing ran on the VPS: not the systemd unit, the role and database, certbot, or the WebSocket through nginx.
+- Invites, the admin UI, first-run setup, backup and restore commands (the runbook uses `pg_dump` and `tar`), and metrics are still step 6.
+- Neither side sends WebSocket pings, so nginx closes a socket that stays quiet for 1 h, and the client reconnects.
+- The build left about 4 GB of BuildKit cache on this Mac. I did not prune it.
