@@ -51,6 +51,8 @@ impl Limiter {
 #[derive(Debug, Clone, Copy)]
 pub struct AuthUser {
     pub user_id: Uuid,
+    /// The session's token hash, so sockets opened with it close when it is revoked.
+    pub session: [u8; 32],
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -65,15 +67,15 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = header
             .strip_prefix("Bearer ")
             .ok_or(ApiError::Unauthorized)?;
-        let user_id = session_user(&state.pool, token)
+        let session = hash_token(token);
+        let user_id = session_user(&state.pool, &session)
             .await?
             .ok_or(ApiError::Unauthorized)?;
-        Ok(AuthUser { user_id })
+        Ok(AuthUser { user_id, session })
     }
 }
 
-pub async fn session_user(pool: &sqlx::PgPool, token: &str) -> ApiResult<Option<Uuid>> {
-    let hash = hash_token(token);
+pub async fn session_user(pool: &sqlx::PgPool, hash: &[u8; 32]) -> ApiResult<Option<Uuid>> {
     let row: Option<(Uuid,)> =
         sqlx::query_as("SELECT user_id FROM sessions WHERE token_hash = $1 AND revoked_at IS NULL")
             .bind(&hash[..])
@@ -81,6 +83,10 @@ pub async fn session_user(pool: &sqlx::PgPool, token: &str) -> ApiResult<Option<
             .await?;
     Ok(row.map(|r| r.0))
 }
+
+/// Tells every node to close sockets of the sessions in `r`; delivered only on commit.
+const NOTIFY_REVOKED: &str =
+    "SELECT pg_notify('commons', 's:' || encode(r.token_hash, 'hex')) FROM r";
 
 pub fn new_token() -> String {
     let mut bytes = [0u8; 32];
@@ -244,7 +250,12 @@ pub async fn logout(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        sqlx::query("UPDATE sessions SET revoked_at = now() WHERE token_hash = $1")
+        let sql = format!(
+            "WITH r AS (UPDATE sessions SET revoked_at = now()
+                         WHERE token_hash = $1 AND revoked_at IS NULL RETURNING token_hash)
+             {NOTIFY_REVOKED}"
+        );
+        sqlx::query(&sql)
             .bind(&hash_token(token)[..])
             .execute(&state.pool)
             .await?;
@@ -333,10 +344,12 @@ pub async fn reset_confirm(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+    let sql = format!(
+        "WITH r AS (UPDATE sessions SET revoked_at = now()
+                     WHERE user_id = $1 AND revoked_at IS NULL RETURNING token_hash)
+         {NOTIFY_REVOKED}"
+    );
+    sqlx::query(&sql).bind(user_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

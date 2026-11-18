@@ -148,3 +148,119 @@ pub async fn replay(
     )
     .await
 }
+
+/// A test socket: frames arrive on `rx`; `rx` closes when the server closes the socket.
+pub struct Socket {
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+pub async fn user_seq(srv: &TestServer, user: Uuid) -> i64 {
+    server::sqlx::query_scalar("SELECT seq FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(srv.pool())
+        .await
+        .unwrap()
+}
+
+/// Opens a socket with `token` and says hello with these cursors.
+pub async fn open_socket(
+    srv: &TestServer,
+    token: &str,
+    user_since: i64,
+    workspaces: &[(Uuid, i64)],
+) -> Socket {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = srv.ws_url.clone().into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let (mut sink, mut stream) = socket.split();
+    let ws: Vec<_> = workspaces
+        .iter()
+        .map(|(w, s)| serde_json::json!({"workspace_id": w, "since": s}))
+        .collect();
+    let hello = serde_json::json!({"type": "hello", "user_since": user_since, "workspaces": ws});
+    sink.send(Message::Text(hello.to_string().into()))
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(Ok(m)) = stream.next().await {
+            if let Message::Text(t) = m
+                && tx.send(serde_json::from_str(&t).unwrap()).is_err()
+            {
+                return;
+            }
+        }
+    });
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        while let Some(t) = out_rx.recv().await {
+            if sink.send(Message::Text(t.into())).await.is_err() {
+                return;
+            }
+        }
+    });
+    Socket { rx, tx: out_tx }
+}
+
+impl Socket {
+    /// The next frame that matches `pred`, or `None` on timeout or close.
+    pub async fn wait_for(
+        &mut self,
+        within: std::time::Duration,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> Option<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, self.rx.recv()).await {
+                Ok(Some(f)) if pred(&f) => return Some(f),
+                Ok(Some(_)) => continue,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Every frame that arrives within `within`. Stops early if the socket closes.
+    pub async fn collect(&mut self, within: std::time::Duration) -> Vec<serde_json::Value> {
+        let mut out = vec![];
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, self.rx.recv()).await {
+                Ok(Some(f)) => out.push(f),
+                _ => return out,
+            }
+        }
+    }
+
+    /// True once the server has closed the socket.
+    pub async fn closed_within(&mut self, within: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, self.rx.recv()).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+pub async fn login(srv: &TestServer, p: &Person) -> String {
+    let (s, v) = call(
+        srv,
+        reqwest::Method::POST,
+        None,
+        "/auth/login",
+        Some(serde_json::json!({"email": p.email, "password": "correct horse battery"})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    v["token"].as_str().unwrap().to_string()
+}

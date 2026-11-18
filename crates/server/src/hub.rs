@@ -38,6 +38,7 @@ pub struct Ephemeral {
 
 struct Conn {
     user_id: Uuid,
+    session: [u8; 32],
     tx: mpsc::Sender<Wakeup>,
     cancel: CancellationToken,
     workspaces: HashSet<Uuid>,
@@ -83,7 +84,7 @@ impl Hub {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    pub fn register(&self, user_id: Uuid) -> Registration {
+    pub fn register(&self, user_id: Uuid, session: [u8; 32]) -> Registration {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(self.queue);
         let cancel = CancellationToken::new();
@@ -92,6 +93,7 @@ impl Hub {
             id,
             Conn {
                 user_id,
+                session,
                 tx,
                 cancel: cancel.clone(),
                 workspaces: HashSet::new(),
@@ -140,6 +142,14 @@ impl Hub {
             inner.by_user.remove(&conn.user_id);
         }
         last
+    }
+
+    /// Closes every socket opened with a revoked session.
+    pub fn revoke_session(&self, session: &[u8; 32]) {
+        let inner = self.lock();
+        for c in inner.conns.values().filter(|c| &c.session == session) {
+            c.cancel.cancel();
+        }
     }
 
     pub fn connections(&self, user_id: Uuid) -> usize {
@@ -233,6 +243,19 @@ impl Hub {
             "e" => {
                 if let Ok(e) = serde_json::from_str(rest) {
                     self.ephemeral(e)
+                }
+            }
+            "s" => {
+                let mut hash = [0u8; 32];
+                let ok = rest.len() == 64
+                    && hash.iter_mut().enumerate().all(|(i, b)| {
+                        rest.get(i * 2..i * 2 + 2)
+                            .and_then(|h| u8::from_str_radix(h, 16).ok())
+                            .map(|v| *b = v)
+                            .is_some()
+                    });
+                if ok {
+                    self.revoke_session(&hash)
                 }
             }
             _ => {}

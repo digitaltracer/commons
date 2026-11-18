@@ -25,7 +25,7 @@ pub async fn upgrade(
 ) -> Response {
     ws.max_message_size(64 * 1024)
         .on_upgrade(move |socket| async move {
-            run(state, auth.user_id, socket).await;
+            run(state, auth, socket).await;
         })
 }
 
@@ -272,7 +272,8 @@ async fn publish_presence(state: &AppState, user_id: Uuid, workspaces: &[Uuid], 
     }
 }
 
-async fn run(state: AppState, user_id: Uuid, socket: WebSocket) {
+async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
+    let user_id = auth.user_id;
     let (sink, mut stream) = socket.split();
     let hello = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await;
     let Ok(Some(Ok(WsMessage::Text(text)))) = hello else {
@@ -285,7 +286,13 @@ async fn run(state: AppState, user_id: Uuid, socket: WebSocket) {
     else {
         return;
     };
-    let mut reg = state.hub.register(user_id);
+    let mut reg = state.hub.register(user_id, auth.session);
+    // A revocation that landed between the upgrade and registering found no socket to close.
+    if !matches!(crate::auth::session_user(&state.pool, &auth.session).await, Ok(Some(u)) if u == user_id)
+    {
+        state.hub.unregister(reg.id);
+        return;
+    }
     let mut session = Session {
         state: state.clone(),
         user_id,

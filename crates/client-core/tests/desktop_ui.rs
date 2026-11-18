@@ -286,3 +286,24 @@ async fn a_revoked_session_signs_in_again_and_keeps_its_cache() {
     );
     acc.stop();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_the_session_while_online_signs_out_without_retrying() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let _ws = workspace(&srv, &alice, &[]).await;
+    let a = account_with_store(&srv, &alice, memory());
+    a.start();
+    eventually("online", || a.connection() == ConnectionState::Online).await;
+    let (s, _) = request(&srv, Method::POST, &alice.token, "/auth/logout", None).await;
+    assert!((200..300).contains(&s));
+    eventually("signed out", || {
+        a.connection() == ConnectionState::SignedOut
+    })
+    .await;
+    // Signed out is final: no reconnect attempt follows.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(a.connection(), ConnectionState::SignedOut);
+    assert_eq!(srv.state.hub.connections(alice.user.id), 0);
+    a.stop();
+}
