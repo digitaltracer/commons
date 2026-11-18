@@ -110,6 +110,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", post(health).get(health));
     Router::new()
         .nest("/v1", v1)
+        .route("/invite", get(invites::landing))
+        // Links made before the token moved into the fragment.
         .route("/invite/{token}", get(invites::landing))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)

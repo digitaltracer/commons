@@ -105,7 +105,7 @@ pub struct Invite {
 pub struct InviteCreated {
     pub invite: Invite,
     pub token: String,
-    /// `<public_url>/invite/<token>`.
+    /// `<public_url>/invite#<token>`; the token is in the fragment, which browsers never send.
     pub link: String,
 }
 
@@ -116,11 +116,37 @@ pub struct InviteList {
 }
 
 /// Splits a pasted invite into the server URL (when it is a whole link) and the token.
+/// Takes `<server>/invite#<token>`, the older `<server>/invite/<token>`, or a bare token.
 pub fn split_invite(pasted: &str) -> (Option<String>, String) {
     let p = pasted.trim().trim_end_matches('/');
-    match p.rsplit_once("/invite/") {
-        Some((server, token)) => (Some(server.to_string()), token.to_string()),
+    let split = p
+        .rsplit_once("/invite#")
+        .or_else(|| p.rsplit_once("/invite/"));
+    match split {
+        Some((server, token)) => (
+            Some(server.to_string()),
+            token.trim_start_matches('#').to_string(),
+        ),
         None => (None, p.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_invite;
+
+    #[test]
+    fn invite_links_old_links_and_bare_tokens() {
+        let server = Some("https://chat.example.org".to_string());
+        assert_eq!(
+            split_invite("https://chat.example.org/invite#abc.DEF-_1"),
+            (server.clone(), "abc.DEF-_1".to_string())
+        );
+        assert_eq!(
+            split_invite(" https://chat.example.org/invite/abc.DEF-_1/ "),
+            (server, "abc.DEF-_1".to_string())
+        );
+        assert_eq!(split_invite("abc.DEF-_1"), (None, "abc.DEF-_1".to_string()));
     }
 }
 

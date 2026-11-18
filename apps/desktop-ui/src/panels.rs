@@ -663,7 +663,7 @@ pub fn JoinInvite() -> impl IntoView {
             <form on:submit=submit>
                 <div class="dbody">
                     <label class="flabel">"Invite link"
-                        <input class="field" required autofocus placeholder="https://…/invite/…"
+                        <input class="field" required autofocus placeholder="https://…/invite#…"
                             prop:value=move || pasted.get() on:input=move |ev| pasted.set(event_target_value(&ev)) /></label>
                     {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
                 </div>

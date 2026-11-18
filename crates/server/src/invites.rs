@@ -91,7 +91,7 @@ pub async fn create(
         .await?;
     let token = format!("{}.{secret}", id.simple());
     let link = format!(
-        "{}/invite/{token}",
+        "{}/invite#{token}",
         state.config.public_url.trim_end_matches('/')
     );
     Ok(Json(InviteCreated {
@@ -145,12 +145,12 @@ pub async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `<id>.<secret>`, alone or at the end of an invite link.
-fn parse_token(raw: &str) -> Option<(Uuid, &str)> {
-    let t = raw.trim();
-    let t = t.rsplit_once("/invite/").map_or(t, |(_, t)| t);
-    let (id, secret) = t.trim_end_matches('/').split_once('.')?;
-    Some((Uuid::parse_str(id).ok()?, secret))
+/// `<id>.<secret>`, alone or at the end of an invite link (`/invite#…`, or the older
+/// `/invite/…`).
+fn parse_token(raw: &str) -> Option<(Uuid, String)> {
+    let (_, t) = proto::api::split_invite(raw);
+    let (id, secret) = t.split_once('.')?;
+    Some((Uuid::parse_str(id).ok()?, secret.to_string()))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -195,7 +195,7 @@ pub async fn prepare(conn: &mut PgConnection, raw: &str) -> ApiResult<Valid> {
         .bind(id)
         .fetch_one(&mut *conn)
         .await?;
-    if !constant_time_eq(&hash_token(secret), &hash) {
+    if !constant_time_eq(&hash_token(&secret), &hash) {
         return Err(invalid());
     }
     if revoked {

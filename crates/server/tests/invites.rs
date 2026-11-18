@@ -76,7 +76,7 @@ async fn only_valid_invites_register() {
     // Valid, given as the whole link: the account joins the workspace with the invite's role.
     let good = invite(&srv, &owner, w.id, "member").await;
     assert!(
-        good.link.ends_with(&format!("/invite/{}", good.token)),
+        good.link == format!("{}/invite#{}", srv.state.config.public_url, good.token),
         "{}",
         good.link
     );
@@ -307,7 +307,8 @@ async fn an_existing_user_accepts_an_invite() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invite_link_opened_in_a_browser_explains_itself() {
     let srv = server::testing::spawn(|_| {}).await;
-    let resp = reqwest::get(format!("{}/invite/abc.def", srv.base_url))
+    // The token rides in the fragment, which the browser keeps to itself.
+    let resp = reqwest::get(format!("{}/invite", srv.base_url))
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
@@ -381,4 +382,18 @@ async fn an_invite_from_a_demoted_admin_is_refused() {
         (403, Some("invite_revoked")),
         "{v}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn links_of_the_older_form_and_bare_tokens_still_work() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let old = invite(&srv, &owner, w.id, "member").await;
+    let old_link = old.link.replace("/invite#", "/invite/");
+    let (s, v) = try_register(&srv, "old@example.org", Some(&old_link)).await;
+    assert_eq!(s, 200, "{v}");
+    let bare = invite(&srv, &owner, w.id, "member").await;
+    let (s, v) = try_register(&srv, "bare@example.org", Some(&bare.token)).await;
+    assert_eq!(s, 200, "{v}");
 }

@@ -82,7 +82,7 @@ Then add the account in the desktop app with the server URL `https://commons.ada
 
 ## Inviting people
 
-In invite mode, the first account registers without an invite. Create a workspace, then use **Invite people** in it (owners and admins). Pick member or guest and an expiry (7 days by default); the app creates a link, `https://commons.adarshnb.com/invite/<token>`, and copies it. Each link works once. Send it to one person:
+In invite mode, the first account registers without an invite. Create a workspace, then use **Invite people** in it (owners and admins). Pick member or guest and an expiry (7 days by default); the app creates a link, `https://commons.adarshnb.com/invite#<token>`, and copies it. The token sits in the fragment, which browsers don't send, so it stays out of nginx's access log. Each link works once. Send it to one person:
 - someone new pastes it into **Add a server account**, which fills in the server, and creates their account, joining the workspace in the same step;
 - someone with an account on this server pastes it into **Join with an invite link** in the switcher.
 

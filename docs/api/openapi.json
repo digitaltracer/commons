@@ -1521,7 +1521,7 @@
           },
           "link": {
             "type": "string",
-            "description": "`<public_url>/invite/<token>`."
+            "description": "`<public_url>/invite#<token>`; the token is in the fragment, which browsers never send."
           },
           "token": {
             "type": "string"
