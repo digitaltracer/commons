@@ -43,17 +43,22 @@
 
 The release checks all four before it builds, and stops with the fix if one is missing.
 
+## The two scripts
+
+- `scripts/try-app.sh` is for testing on this Mac, as often as you like. It builds the release app signed with your Developer ID, skips notarization and update signing (so no passwords and no waiting on Apple), quits any running Commons, installs it in `/Applications` and launches it. `--dmg` installs it from a disk image instead.
+- `scripts/release.sh [patch|minor|major|x.y.z]` does a public release: steps 1 to 4 below. It stops early unless `main` is clean, matches GitHub's, and passed CI. It builds with `cargo xtask release`, installs the result from the DMG and opens it, then publishes only after you type `publish`. If it stops or fails before publishing, it undoes the version bump, so the next run doesn't skip a version.
+
 ## Each release
 
-1. **Bump the version** in `apps/desktop/Cargo.toml`. That is the only place. `tauri.conf.json` has no version, so Tauri uses the crate's, and the release, `latest.json` and the update signature all take it from there. The updater only installs a version greater than the running one. Commit the bump.
-
-2. **Build:**
+1. **Bump the version and build** in one go, with `patch`, `minor`, `major` or an exact version:
 
    ```sh
-   cargo xtask release
+   cargo xtask release patch      # 0.1.0 -> 0.1.1
    ```
 
-   Run it in your own terminal. Near the end, the signer asks for the updater key's password. If you would rather export `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` for the run, do it in that terminal only, never in a file. The build takes a few minutes, and each of the two notarizations (the app, then the dmg) usually takes a few more.
+   The version lives only in `apps/desktop/Cargo.toml`. `tauri.conf.json` has none, so Tauri uses the crate's, and the release, `latest.json` and the update signature all take it from there. The updater only installs a version greater than the running one. The release checks your signing setup first, then refuses to bump with uncommitted changes, sets the version, updates `Cargo.lock`, and commits `chore(release): Commons <version>` on its own. It doesn't push: push that commit before you publish. With no argument, it builds the current version, for a first release or a rebuild.
+
+2. **The build** runs in your own terminal. Near the end, the signer asks for the updater key's password. If you would rather export `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` for the run, do it in that terminal only, never in a file. The build takes a few minutes, and each of the two notarizations (the app, then the dmg) usually takes a few more.
 
    The output goes to `target/release-mac/<version>/`:
 
