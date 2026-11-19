@@ -242,6 +242,10 @@ async fn an_opened_invite_link_previews_then_signs_up_with_the_provider() {
         "a\u{2022}\u{2022}\u{2022}@example.org"
     );
     assert!(opened.accounts.is_empty(), "a new server to this app");
+    assert_eq!(
+        opened.preview.oidc.map(|o| o.name).as_deref(),
+        Some("Google")
+    );
     assert!(core.accounts().is_empty(), "opening a link adds nothing");
 
     let id = core

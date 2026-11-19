@@ -335,6 +335,9 @@ pub async fn preview(
         role: l.role,
         expires_at_ms: crate::db::ms(l.expires_at),
         email_masked: mask_email(&l.email),
+        oidc: state.config.oidc.as_ref().map(|o| proto::api::OidcMeta {
+            name: o.name.clone(),
+        }),
     }))
 }
 

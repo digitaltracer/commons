@@ -254,6 +254,9 @@ pub struct InvitePreview {
     pub expires_at_ms: i64,
     /// The invited address with most of its local part hidden, such as `ad•••@gmail.com`.
     pub email_masked: String,
+    /// The server's sign-in provider, as in [`Meta`], so the app needn't ask separately.
+    #[serde(default)]
+    pub oidc: Option<OidcMeta>,
 }
 
 #[cfg(test)]

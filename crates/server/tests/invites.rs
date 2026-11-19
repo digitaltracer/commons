@@ -398,6 +398,7 @@ async fn a_preview_shows_the_invite_without_using_it() {
             role: proto::model::Role::Guest,
             expires_at_ms: inv.invite.expires_at_ms,
             email_masked: "ad\u{2022}\u{2022}\u{2022}@gmail.com".into(),
+            oidc: None,
         }
     );
     // Previewing twice changes nothing, and the invite still registers its account.

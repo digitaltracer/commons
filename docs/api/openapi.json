@@ -1868,6 +1868,17 @@
           "inviter_name": {
             "type": "string"
           },
+          "oidc": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OidcMeta",
+                "description": "The server's sign-in provider, as in [`Meta`], so the app needn't ask separately."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "role": {
             "$ref": "#/components/schemas/Role"
           },
