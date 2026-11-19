@@ -27,6 +27,7 @@ Built against the UX review proposal and the user's decisions of 2026-11-19. Pac
 **Layout (package 4)**
 - B1: drag handles on the sidebar's and thread's edges (sidebar 208–420 px, default 256; thread 320–560 px, default 380), with arrow keys, Shift for bigger steps, Home and End, and double-click or Return to reset. They are separators with `aria-valuenow`. Widths are stored by the core in `ui_prefs.json`. The message column keeps at least 480 px: the sidebar narrows first, and below that an open thread or members panel floats over the messages with a scrim.
 - C2: the rail is darker than the sidebar, with no border between them.
+- B1 (window frame): the official `tauri-plugin-window-state`, on its 2.5 line (built on Tauri 2.12), restores the window's size, position, maximized and fullscreen state. It leaves decorations and visibility alone, so it can't undo the overlay title bar or reopen a hidden window. It runs from Rust only, so the capability file gains no permissions. macOS applies the 900×560 minimum only to drags, so any resize below it, from an old or edited state file or from code, is raised back to the minimum.
 
 **Visual refresh (package 5)**
 - B2: rows from one author within five minutes, with no divider between them, drop the avatar and name. The time shows in the gutter on hover or focus.
@@ -56,9 +57,9 @@ Built against the UX review proposal and the user's decisions of 2026-11-19. Pac
 ## Checks
 - Core tests: drafts per conversation and thread with sidebar events only on marker changes, the sidebar flag, drafts across a restart, background window presentation and read rules, UI preferences clamped and across a restart, reply summaries. Proto test for width clamping. Desktop UI tests for the fence and Return rules, shortcuts, mention queries, pane width math and palette scoring.
 - Every package was run in the browser harness (Chrome, Tauri IPC stubbed): drafts across switching and reload, fences, edit in place, delete confirm, Escape, re-pin after send, New line and pill, read marks with the window blurred and focused, scroll anchors, skeleton rows, pane drag and keyboard resize with reload, the thread overlay, grouping, Show more, the intro block, thread summaries, keyboard reactions, the live region, light and dark tokens, and the palette with 500 conversations (Return opened the channel in 37 ms).
+- Window frame, in the real app (`cargo xtask app`, throwaway `HOME`). System Events had no accessibility access and the session couldn't capture the screen, so a temporary, uncommitted hook set the frame from code and then quit through the same exit path as ⌘Q. Results: the first launch opened at the default 1280×820; a frame of 1000×640 at (140, 80) came back exactly on relaunch; a state file edited to 700×400 opened at 900×560, and was saved that way; a 600×300 frame set from code was raised to 900×560. The traffic lights on a restored window were not looked at.
 - The real app was built with `cargo xtask app` and launched once with a throwaway `HOME`: it reached the sign-in screen with no UI errors in the log. It wasn't driven further, because this session had no control of native windows.
 
 ## Left
-- Window size and position (`tauri-plugin-window-state`) waits for `Cargo.lock` to be free.
-- Not checked in WKWebView by hand: notifications from a second live client while the window is in the background, Escape and ⌥-arrows with a real keyboard, pointer drags on the pane handles, and VoiceOver reading the separators, rows and live region.
+- Not checked by hand in the real app: dragging and moving the window with the mouse before quitting, the traffic lights on a restored window, notifications from a second live client while the window is in the background, Escape and ⌥-arrows with a real keyboard, pointer drags on the pane handles, and VoiceOver reading the separators, rows and live region.
 - Drafts are not cleared when a conversation is purged; they come back if access does.
