@@ -1043,6 +1043,7 @@ dependencies = [
  "async-trait",
  "client-core",
  "proto",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",

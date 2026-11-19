@@ -161,6 +161,8 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    // Two rustls backends are linked, so rustls cannot choose one itself.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let spike_mode = std::env::var("COMMONS_SPIKE").is_ok_and(|v| v == "1");
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
