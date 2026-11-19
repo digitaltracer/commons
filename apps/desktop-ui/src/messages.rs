@@ -987,11 +987,23 @@ fn may_clamp_when_narrower(content_px: f64) -> bool {
 /// Asks before deleting a message, in a small popover at the trash button.
 #[component]
 fn ConfirmDelete(at: (f64, f64), on_delete: Callback<()>, on_close: Callback<()>) -> impl IntoView {
-    let yes: NodeRef<leptos::html::Button> = NodeRef::new();
+    // Return on open must not delete: Cancel takes focus, as when removing an account.
+    let cancel: NodeRef<leptos::html::Button> = NodeRef::new();
+    let pop: NodeRef<Div> = NodeRef::new();
+    let opener = StoredValue::new_local(document().active_element());
     Effect::new(move |_| {
-        if let Some(b) = yes.get() {
+        if let Some(b) = cancel.get() {
             let _ = b.focus();
         }
+    });
+    // It's placed for the window it opened in; a resize could leave it off screen.
+    let resized = window_event_listener(leptos::ev::resize, move |_| on_close.run(()));
+    on_cleanup(move || {
+        resized.remove();
+        ui::give_back_focus(
+            opener.try_update_value(|o| o.take()).flatten(),
+            pop.get_untracked().map(Into::into),
+        );
     });
     let h = web_sys::window()
         .and_then(|w| w.inner_height().ok())
@@ -1006,13 +1018,13 @@ fn ConfirmDelete(at: (f64, f64), on_delete: Callback<()>, on_close: Callback<()>
     let style = format!("left: {}px; top: {}px", (x - 264.0).max(8.0), top.max(8.0));
     view! {
         <div class="backdrop" on:click=move |_| on_close.run(())></div>
-        <div class="confirm" style=style role="alertdialog" aria-labelledby="del-t" aria-describedby="del-d"
+        <div class="confirm" style=style role="alertdialog" aria-labelledby="del-t" aria-describedby="del-d" node_ref=pop
             on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); on_close.run(()) }>
             <p id="del-t" class="ctitle">"Delete this message?"</p>
             <p id="del-d" class="muted">"It's removed for everyone in the conversation. This can't be undone."</p>
             <div class="crow">
-                <button type="button" class="btn" on:click=move |_| on_close.run(())>"Cancel"</button>
-                <button type="button" class="btn dangerfill" node_ref=yes on:click=move |_| on_delete.run(())>"Delete"</button>
+                <button type="button" class="btn" node_ref=cancel on:click=move |_| on_close.run(())>"Cancel"</button>
+                <button type="button" class="btn dangerfill" on:click=move |_| on_delete.run(())>"Delete"</button>
             </div>
         </div>
     }
