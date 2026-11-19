@@ -438,6 +438,30 @@ pub fn invite_route(accounts: &[Uuid]) -> InviteRoute {
     }
 }
 
+/// Where a pasted invite goes, by the same rule as an opened one. `server` is the link's
+/// server, None for a bare token; `accounts` are this device's, with their server URLs. None
+/// means a bare token with several accounts to choose between, so the whole link is needed.
+pub fn pasted_invite_route(
+    server: Option<&str>,
+    accounts: &[(Uuid, String)],
+) -> Option<InviteRoute> {
+    let origin = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
+    match server {
+        Some(s) => {
+            let here: Vec<Uuid> = accounts
+                .iter()
+                .filter(|(_, u)| origin(u) == origin(s))
+                .map(|(id, _)| *id)
+                .collect();
+            Some(invite_route(&here))
+        }
+        None => match accounts {
+            [(one, _)] => Some(InviteRoute::Join(*one)),
+            _ => None,
+        },
+    }
+}
+
 impl Ctx {
     /// Shows the screen for an invite the app was opened with. It only fills in a form: no
     /// request is made, and the place in the app doesn't change.
@@ -470,8 +494,34 @@ impl Ctx {
 
 #[cfg(test)]
 mod invite_tests {
-    use super::{InviteRoute, invite_route};
+    use super::{InviteRoute, invite_route, pasted_invite_route};
     use uuid::Uuid;
+
+    #[test]
+    fn a_pasted_link_offers_the_same_choice_as_an_opened_one() {
+        let (a, b, x) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        let two = [
+            (a, "https://chat.example.org".to_string()),
+            (b, "https://chat.example.org/".to_string()),
+            (x, "https://studio.example.org".to_string()),
+        ];
+        let at = |s| pasted_invite_route(Some(s), &two);
+        assert_eq!(
+            at("https://chat.example.org"),
+            Some(InviteRoute::Pick(vec![a, b]))
+        );
+        assert_eq!(
+            at("https://Studio.example.org/"),
+            Some(InviteRoute::Join(x))
+        );
+        assert_eq!(at("https://new.example.org"), Some(InviteRoute::Register));
+        // A bare token can't say which server; with one account there is no question.
+        assert_eq!(pasted_invite_route(None, &two), None);
+        assert_eq!(
+            pasted_invite_route(None, &two[2..]),
+            Some(InviteRoute::Join(x))
+        );
+    }
 
     #[test]
     fn an_opened_invite_goes_to_sign_up_join_or_a_choice() {

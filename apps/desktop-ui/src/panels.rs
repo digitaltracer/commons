@@ -7,7 +7,7 @@ use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
 use crate::ipc;
-use crate::state::{Aside, Overlay, Selection, ctx, is_dm};
+use crate::state::{Aside, InviteRoute, Overlay, Selection, ctx, is_dm, pasted_invite_route};
 use crate::ui::{self, Icon, avatar, icon, sized};
 
 /// What Tab can reach inside a dialog.
@@ -1077,6 +1077,25 @@ pub fn InviteSummary(invite: proto::view::OpenedInvite, new_server: bool) -> imp
     }
 }
 
+fn email_of(id: Uuid) -> String {
+    ctx().account(id).map(|a| a.email).unwrap_or_default()
+}
+
+/// Which of this device's accounts on an invite's server joins.
+#[component]
+fn JoinAs(accounts: Vec<Uuid>, chosen: RwSignal<Option<Uuid>>) -> impl IntoView {
+    view! {
+        <fieldset class="pick">
+            <legend>"Join as"</legend>
+            {accounts.into_iter().map(|id| view! {
+                <label class="chk"><input type="radio" name="joinas"
+                    prop:checked=move || chosen.get() == Some(id)
+                    on:change=move |_| chosen.set(Some(id)) />{email_of(id)}</label>
+            }).collect_view()}
+        </fieldset>
+    }
+}
+
 /// Joins a workspace with an invite link, as an account on its server. Opened from a
 /// `commons://` link it comes filled in, and asks which account when there are several.
 #[component]
@@ -1090,6 +1109,24 @@ pub fn JoinInvite() -> impl IntoView {
     Effect::new(move |_| {
         chosen.set(opened.with(|o| o.as_ref().and_then(|o| o.accounts.first().copied())));
         error.set(None);
+    });
+    let pasted_route = Memo::new(move |_| {
+        let (server, _) = proto::api::split_invite(&pasted.get());
+        let accounts: Vec<(Uuid, String)> = c.sidebar.with(|s| {
+            s.accounts
+                .iter()
+                .map(|a| (a.id, a.server_url.clone()))
+                .collect()
+        });
+        pasted_invite_route(server.as_deref(), &accounts)
+    });
+    // A pasted link for a server with several accounts here offers them, first one chosen.
+    Effect::new(move |_| {
+        if let Some(InviteRoute::Pick(ids)) = pasted_route.get()
+            && !chosen.get_untracked().is_some_and(|a| ids.contains(&a))
+        {
+            chosen.set(ids.first().copied());
+        }
     });
     let close = move || {
         opened.set(None);
@@ -1119,32 +1156,26 @@ pub fn JoinInvite() -> impl IntoView {
             return;
         }
         let link = pasted.get_untracked();
-        let (server, token) = proto::api::split_invite(&link);
-        let accounts = c.sidebar.get_untracked().accounts;
-        let same = |a: &&proto::view::AccountView| {
-            server.as_deref().map(|s| s.trim_end_matches('/'))
-                == Some(a.server_url.trim_end_matches('/'))
-        };
-        let account = match (&server, accounts.len()) {
-            (Some(_), _) => accounts.iter().find(same).map(|a| a.id),
-            (None, 1) => accounts.first().map(|a| a.id),
-            (None, _) => {
-                error.set(Some(
-                    "Paste the whole link, so Commons knows which server it's for.".into(),
-                ));
-                return;
+        let (_, token) = proto::api::split_invite(&link);
+        match pasted_route.get_untracked() {
+            None => error.set(Some(
+                "Paste the whole link, so Commons knows which server it's for.".into(),
+            )),
+            Some(InviteRoute::Register) => {
+                // No account on that server yet: sign up or in there, with the link.
+                c.invite_link.set(Some(link));
+                c.overlay.set(Overlay::None);
+                c.adding.set(true);
             }
-        };
-        let Some(account_id) = account else {
-            // No account on that server yet: sign up or in there, with the link.
-            c.invite_link.set(Some(link));
-            c.overlay.set(Overlay::None);
-            c.adding.set(true);
-            return;
-        };
-        join(account_id, token);
+            Some(InviteRoute::Join(account_id)) => join(account_id, token),
+            Some(InviteRoute::Pick(ids)) => {
+                match chosen.get_untracked().filter(|a| ids.contains(a)) {
+                    Some(account_id) => join(account_id, token),
+                    None => error.set(Some("Choose which account joins.".into())),
+                }
+            }
+        }
     };
-    let email_of = move |id: Uuid| c.account(id).map(|a| a.email).unwrap_or_default();
     view! {
         <Dialog label="Join with an invite link">
             <form on:submit=submit>
@@ -1155,16 +1186,7 @@ pub fn JoinInvite() -> impl IntoView {
                             let several = accounts.len() > 1;
                             view! {
                                 <InviteSummary invite=o new_server=false />
-                                {several.then(|| view! {
-                                    <fieldset class="pick">
-                                        <legend>"Join as"</legend>
-                                        {accounts.into_iter().map(|id| view! {
-                                            <label class="chk"><input type="radio" name="joinas"
-                                                prop:checked=move || chosen.get() == Some(id)
-                                                on:change=move |_| chosen.set(Some(id)) />{email_of(id)}</label>
-                                        }).collect_view()}
-                                    </fieldset>
-                                })}
+                                {several.then(|| view! { <JoinAs accounts=accounts chosen=chosen /> })}
                                 {(!several).then(|| view! {
                                     <p class="muted">{move || chosen.get().map(|id| format!("Joining as {}", email_of(id)))}</p>
                                 })}
@@ -1174,6 +1196,10 @@ pub fn JoinInvite() -> impl IntoView {
                             <label class="flabel">"Invite link"
                                 <input class="field" required autofocus placeholder="https://…/invite#…"
                                     prop:value=move || pasted.get() on:input=move |ev| pasted.set(event_target_value(&ev)) /></label>
+                            {move || match pasted_route.get() {
+                                Some(InviteRoute::Pick(ids)) => Some(view! { <JoinAs accounts=ids chosen=chosen /> }),
+                                _ => None,
+                            }}
                         }.into_any(),
                     }}
                     {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
