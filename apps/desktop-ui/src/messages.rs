@@ -9,7 +9,7 @@ use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
 use crate::compose;
-use crate::emoji::EmojiPicker;
+use crate::emoji::{self, EmojiPicker};
 use crate::ipc;
 use crate::layer;
 use crate::markdown::{self, Reader, mentions_me};
@@ -1186,6 +1186,38 @@ fn keep_draft(
     });
 }
 
+/// Which autocomplete a typed sigil opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sigil {
+    At,
+    Colon,
+}
+
+/// Autocomplete suggestions for what is being typed.
+#[derive(Debug, Clone, PartialEq)]
+enum Hits {
+    None,
+    People(Vec<Member>),
+    Emoji(Vec<emoji::Found>),
+}
+
+impl Hits {
+    fn len(&self) -> usize {
+        match self {
+            Hits::None => 0,
+            Hits::People(v) => v.len(),
+            Hits::Emoji(v) => v.len(),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Hits::Emoji(_) => "Emoji",
+            _ => "People to mention",
+        }
+    }
+}
+
 #[component]
 pub fn Composer(
     account_id: Uuid,
@@ -1203,7 +1235,7 @@ pub fn Composer(
     let boxes: NodeRef<Div> = NodeRef::new();
     let last_typing = StoredValue::new(0f64);
     let members = RwSignal::new(Vec::<Member>::new());
-    let ac = RwSignal::new(None::<(usize, String)>);
+    let ac = RwSignal::new(None::<(Sigil, usize, String)>);
     let ac_index = RwSignal::new(0usize);
     let emoji = RwSignal::new(false);
     let fence = RwSignal::new(false);
@@ -1301,41 +1333,59 @@ pub fn Composer(
         focus_composer(conversation_id, thread);
     }
 
-    let suggestions = move || {
-        let Some((_, q)) = ac.get() else {
-            return vec![];
-        };
-        members.with(|ms| {
+    let hits = Memo::new(move |_| match ac.get() {
+        None => Hits::None,
+        Some((Sigil::At, _, q)) => Hits::People(members.with(|ms| {
             ms.iter()
                 .filter(|m| m.user_id != me && compose::matches_query(&m.display_name, &q))
                 .take(6)
                 .cloned()
-                .collect::<Vec<_>>()
-        })
-    };
+                .collect()
+        })),
+        Some((Sigil::Colon, _, q)) => Hits::Emoji(emoji::search(&q, 6)),
+    });
+    let ac_open = move || hits.with(|h| h.len() > 0);
 
     let refresh = move || {
         let t = text.get_untracked();
         let (caret, end) = selection(&t, area);
         fence.set(compose::in_open_fence(&t[..caret]));
         let q = (caret == end)
-            .then(|| compose::mention_query(&t, caret))
+            .then(|| {
+                compose::mention_query(&t, caret)
+                    .map(|(at, q)| (Sigil::At, at, q))
+                    .or_else(|| {
+                        compose::emoji_query(&t, caret).map(|(at, q)| (Sigil::Colon, at, q))
+                    })
+            })
             .flatten();
-        if q.is_none() || q.as_ref().map(|x| &x.1) != ac.get_untracked().as_ref().map(|x| &x.1) {
+        if q.is_none() || q != ac.get_untracked() {
             ac_index.set(0);
         }
         ac.set(q);
     };
 
-    let pick = move |m: Member| {
-        let Some((at, _)) = ac.get_untracked() else {
+    // Replaces the typed `@name` or `:name` with the suggestion at `i`.
+    let pick = move |i: usize| {
+        let Some((_, at, _)) = ac.get_untracked() else {
             return;
         };
         let t = text.get_untracked();
         let (caret, _) = selection(&t, area);
-        picked.update_value(|p| p.push((m.user_id, m.display_name.clone())));
+        let insert = match hits.get_untracked() {
+            Hits::None => return,
+            Hits::People(v) => {
+                let Some(m) = v.get(i) else { return };
+                picked.update_value(|p| p.push((m.user_id, m.display_name.clone())));
+                format!("@{} ", m.display_name)
+            }
+            Hits::Emoji(v) => {
+                let Some(f) = v.get(i) else { return };
+                f.emoji.to_string()
+            }
+        };
         ac.set(None);
-        splice(text, area, at, caret, &format!("@{} ", m.display_name), 0);
+        splice(text, area, at, caret, &insert, 0);
     };
 
     let send = move || {
@@ -1391,6 +1441,7 @@ pub fn Composer(
     let rows =
         move || text.with(|t| t.lines().count().clamp(1, 8) + usize::from(t.ends_with('\n')));
     let id = composer_id(conversation_id, thread);
+    let list_id = StoredValue::new(format!("{id}-ac"));
     let placeholder2 = placeholder.clone();
     let fmt = |label: &'static str, i: Icon, marks: &'static str| {
         view! {
@@ -1413,8 +1464,11 @@ pub fn Composer(
                         ConnectionState::SignedOut => format!("{placeholder2}. Sends after you sign in"),
                         _ => format!("{placeholder2}. Sends when you're back online"),
                     }
-                    aria-autocomplete="list" aria-expanded=move || (!suggestions().is_empty()).to_string()
+                    aria-autocomplete="list" aria-expanded=move || ac_open().to_string()
+                    aria-controls=list_id.get_value()
+                    aria-activedescendant=move || ac_open().then(|| format!("{}-{}", list_id.get_value(), ac_index.get()))
                     on:scroll=move |_| layer::sync(area, hl)
+                    on:blur=move |_| ac.set(None)
                     on:input=move |ev| {
                         text.set(event_target_value(&ev));
                         refresh();
@@ -1430,12 +1484,12 @@ pub fn Composer(
                         if ev.is_composing() {
                             return;
                         }
-                        let s = suggestions();
-                        if !s.is_empty() {
+                        let n = hits.with_untracked(Hits::len);
+                        if n > 0 {
                             match ev.key().as_str() {
-                                "ArrowDown" => { ev.prevent_default(); ac_index.update(|i| *i = (*i + 1) % s.len()); return; }
-                                "ArrowUp" => { ev.prevent_default(); ac_index.update(|i| *i = (*i + s.len() - 1) % s.len()); return; }
-                                "Enter" | "Tab" => { ev.prevent_default(); pick(s[ac_index.get_untracked().min(s.len() - 1)].clone()); return; }
+                                "ArrowDown" => { ev.prevent_default(); ac_index.update(|i| *i = (*i + 1) % n); return; }
+                                "ArrowUp" => { ev.prevent_default(); ac_index.update(|i| *i = (*i + n - 1) % n); return; }
+                                "Enter" | "Tab" => { ev.prevent_default(); pick(ac_index.get_untracked().min(n - 1)); return; }
                                 "Escape" => { ev.prevent_default(); ac.set(None); return; }
                                 _ => {}
                             }
@@ -1461,21 +1515,34 @@ pub fn Composer(
                         }
                     }
                 ></textarea>
-                <Show when=move || !suggestions().is_empty()>
-                    <ul class="ac" role="listbox" aria-label="People to mention">
-                        {move || suggestions().into_iter().enumerate().map(|(i, m)| {
-                            let online = c.online(account_id, m.user_id);
-                            let target = m.clone();
-                            view! {
-                                <li role="option" aria-selected=move || (ac_index.get() == i).to_string()
+                <Show when=ac_open>
+                    <ul class="ac" role="listbox" id=list_id.get_value() aria-label=move || hits.with(Hits::label)>
+                        {move || {
+                            let lid = list_id.get_value();
+                            let option = move |i: usize, body: AnyView| view! {
+                                <li role="option" id=format!("{lid}-{i}") aria-selected=move || (ac_index.get() == i).to_string()
                                     class:on=move || ac_index.get() == i
-                                    on:mousedown=move |ev| { ev.prevent_default(); pick(target.clone()); }>
-                                    {avatar(m.user_id, &m.display_name, "s")}
-                                    <span class="acname">{m.display_name.clone()}</span>
-                                    <span class="pres" class:online=online aria-label=if online { "online" } else { "offline" }></span>
-                                </li>
+                                    on:mousedown=move |ev| { ev.prevent_default(); pick(i); }>{body}</li>
+                            };
+                            match hits.get() {
+                                Hits::None => vec![],
+                                Hits::People(v) => v.into_iter().enumerate().map(|(i, m)| {
+                                    let online = c.online(account_id, m.user_id);
+                                    option(i, view! {
+                                        {avatar(m.user_id, &m.display_name, "s")}
+                                        <span class="acname">{m.display_name.clone()}</span>
+                                        <span class="pres" class:online=online aria-label=if online { "online" } else { "offline" }></span>
+                                    }.into_any())
+                                }).collect::<Vec<_>>(),
+                                Hits::Emoji(v) => v.into_iter().enumerate().map(|(i, f)| {
+                                    option(i, view! {
+                                        <span class="acemo" aria-hidden="true">{f.emoji}</span>
+                                        <span class="acname">{f.label}</span>
+                                        {f.hint.map(|h| view! { <span class="acsub">{h}</span> })}
+                                    }.into_any())
+                                }).collect::<Vec<_>>(),
                             }
-                        }).collect_view()}
+                        }}
                     </ul>
                 </Show>
             </div>
@@ -1522,6 +1589,12 @@ pub fn Composer(
                         view! { "Signed out · messages wait in your outbox" }.into_any()
                     } else if offline() {
                         view! { "Offline · messages wait in your outbox" }.into_any()
+                    } else if ac_open() {
+                        let what = hits.with(|h| match h {
+                            Hits::Emoji(v) => v.get(ac_index.get()).map_or(String::new(), |f| format!(" {}", f.emoji)),
+                            _ => String::new(),
+                        });
+                        view! { "↑↓ choose · Tab or Return inserts"{what}" · Esc closes" }.into_any()
                     } else if fence.get() {
                         view! { <b>"Code block"</b>" · Return adds a line · ⌘Return sends" }.into_any()
                     } else {

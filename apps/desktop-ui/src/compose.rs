@@ -85,6 +85,36 @@ pub fn matches_query(name: &str, q: &str) -> bool {
     n.starts_with(&q) || n.split_whitespace().any(|w| w.starts_with(&q))
 }
 
+/// Whether the caret, after `before`, sits in code: an open fence, or inline code opened on
+/// its line.
+pub fn in_code(before: &str) -> bool {
+    let line = before.rsplit('\n').next().unwrap_or("");
+    in_open_fence(before) || line.matches('`').count() % 2 == 1
+}
+
+/// The sigil's position and the word typed after it, when `sigil` starts a word.
+fn sigil_query(text: &str, caret: usize, sigil: char) -> Option<(usize, &str)> {
+    let before = text.get(..caret)?;
+    let at = before.rfind(sigil)?;
+    if at > 0 && !before[..at].ends_with(|c: char| c.is_whitespace() || "([{".contains(c)) {
+        return None;
+    }
+    if in_code(before) {
+        return None;
+    }
+    Some((at, &before[at + sigil.len_utf8()..]))
+}
+
+/// A `:name` being typed: where the `:` is and the name so far, lower-cased. Two letters
+/// first, so times and ratios don't open it.
+pub fn emoji_query(text: &str, caret: usize) -> Option<(usize, String)> {
+    let (at, q) = sigil_query(text, caret, ':')?;
+    let ok = (2..=32).contains(&q.len())
+        && q.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_+-".contains(c));
+    ok.then(|| (at, q.to_ascii_lowercase()))
+}
+
 /// One stretch of the highlight layer: a byte range and the styles on it, as bits.
 pub type Run = (Range<usize>, u16);
 
@@ -214,6 +244,21 @@ mod tests {
         assert_eq!(shortcut_markers("b", true), None);
         assert_eq!(code_block("", true), ("```\n\n```".to_string(), 4));
         assert_eq!(code_block("a", false), ("\n```\na\n```".to_string(), 4));
+    }
+
+    #[test]
+    fn emoji_queries() {
+        assert_eq!(emoji_query("Shipped :ta", 11), Some((8, "ta".into())));
+        assert_eq!(emoji_query(":Tada", 5), Some((0, "tada".into())));
+        assert_eq!(emoji_query("(:+1", 4), Some((1, "+1".into())));
+        // One letter, times, words and code don't open it.
+        assert_eq!(emoji_query("hi :t", 5), None);
+        assert_eq!(emoji_query("at 10:30", 8), None);
+        assert_eq!(emoji_query("key:value", 9), None);
+        assert_eq!(emoji_query("a :ta b", 7), None);
+        assert_eq!(emoji_query("`x :ta", 6), None);
+        assert_eq!(emoji_query("```\n:ta", 7), None);
+        assert_eq!(emoji_query("`x` :ta", 7), Some((4, "ta".into())));
     }
 
     #[test]

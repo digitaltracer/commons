@@ -322,7 +322,10 @@ a { color: var(--accent); }
 .ac { position: absolute; left: 8px; bottom: calc(100% + 6px); width: 280px; margin: 0; padding: 4px; list-style: none; background: var(--pop); border: 1px solid var(--line2); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.16); z-index: 20; }
 .ac li { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: 6px; font-size: 13.5px; }
 .ac li.on { background: var(--sel); color: var(--seltext); }
-.acname { flex: 1; }
+.acname { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acemo { font-size: 17px; width: 20px; text-align: center; flex: none; }
+.acsub { font-size: 11.5px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.ac li.on .acsub { color: var(--seltext); }
 .emowrap { position: relative; display: flex; }
 
 /* Emoji picker */
@@ -331,9 +334,14 @@ a { color: var(--accent); }
 .picker.down { top: 28px; }
 .picker.up { bottom: 34px; left: 0; right: auto; }
 .ptitle { font-size: 11px; font-weight: 600; color: var(--text2); padding: 2px 4px 4px; }
-.pgrid { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 6px; }
-.emo { width: 34px; height: 32px; border-radius: 6px; font-size: 18px; display: flex; align-items: center; justify-content: center; }
+.psearch { display: block; width: 100%; height: 30px; margin: 0 0 8px; padding: 0 10px; border: 1px solid var(--line2); border-radius: 7px; background: var(--field); outline: 0; font-size: 13px; }
+.psearch:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentsoft); }
+.pscroll { max-height: 264px; overflow-y: auto; }
+.pgrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; margin-bottom: 6px; }
+.pnone { margin: 4px 4px 8px; color: var(--text2); font-size: 12.5px; }
+.emo { height: 32px; border-radius: 6px; font-size: 18px; display: flex; align-items: center; justify-content: center; }
 .emo:hover, .emo:focus-visible { background: var(--hover); }
+.emo:focus-visible { outline-offset: -2px; }
 
 /* Thread and members panels */
 .asidewrap { flex: none; display: flex; position: relative; }
