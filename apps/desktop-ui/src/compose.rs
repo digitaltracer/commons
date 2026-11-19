@@ -218,6 +218,17 @@ pub fn send_blocked(files: &[StagedFile]) -> Option<&'static str> {
     }
 }
 
+/// Why Edit on a queued message can't move its text into the composer: the composer already
+/// holds a draft, which it would replace. The queued message stays queued.
+pub const REFILL_REFUSED: &str =
+    "Your draft has text. Send or clear it, then choose Edit again to change the waiting message.";
+
+/// Whether a queued message's text may replace the composer's: only when the composer's own
+/// draft has loaded and is empty, so no draft is ever lost.
+pub fn can_refill(draft: &str, loaded: bool) -> bool {
+    loaded && draft.trim().is_empty()
+}
+
 /// Whether a paste carrying files should stage them rather than paste its text. Finder puts
 /// the files' names in the text; anything else (a rich copy with a rendered image) pastes as
 /// text.
@@ -335,6 +346,15 @@ pub fn paint(len: usize, ranges: &[(Range<usize>, Style)]) -> Vec<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queued_edit_never_replaces_a_draft() {
+        assert!(can_refill("", true));
+        assert!(can_refill(" \n", true));
+        assert!(!can_refill("Separate unsent draft", true));
+        // The saved draft may still be loading: it would be overwritten once it arrives.
+        assert!(!can_refill("", false));
+    }
 
     #[test]
     fn fences_open_and_close() {

@@ -14,7 +14,7 @@ use crate::ipc;
 use crate::layer;
 use crate::markdown::{self, Reader, mentions_me};
 use crate::spike;
-use crate::state::{Aside, ctx};
+use crate::state::{Aside, Refill, ctx};
 use crate::ui::{self, Icon, avatar, icon, sized};
 
 /// Rows to shift the window by when the reader reaches either end.
@@ -704,10 +704,7 @@ fn Message(
                                 } else { "Waiting to send. It goes out once when you reconnect." }}</span>
                                 <button class="plink" on:click={
                                     let body = body.clone();
-                                    move |_| {
-                                        ipc::command("discard_send", json!({"accountId": account_id, "id": id}));
-                                        c.refill.set(Some((conversation_id, body.clone())));
-                                    }
+                                    move |_| c.refill.set(Some(Refill { account_id, conversation_id, id, body: body.clone() }))
                                 }>"Edit"</button>
                                 <button class="plink" on:click=move |_| ipc::command("discard_send", json!({"accountId": account_id, "id": id}))>"Delete"</button>
                             }.into_any()
@@ -1358,13 +1355,30 @@ pub fn Composer(
         }
     });
 
+    // The composer discards the queued send only once its text has somewhere to go.
     Effect::new(move |_| {
-        if let Some((conv, body)) = c.refill.get()
-            && conv == conversation_id
+        if let Some(r) = c.refill.get()
+            && r.conversation_id == conversation_id
             && !thread
         {
             c.refill.set(None);
-            text.set(body);
+            if compose::can_refill(&text.get_untracked(), draft_ready.get_untracked()) {
+                ipc::command(
+                    "discard_send",
+                    json!({"accountId": r.account_id, "id": r.id}),
+                );
+                text.set(r.body);
+                notice.set(None);
+            } else {
+                notice.set(Some(compose::REFILL_REFUSED.to_string()));
+            }
+        }
+    });
+    Effect::new(move |_| {
+        if text.with(|t| t.trim().is_empty())
+            && notice.with_untracked(|n| n.as_deref() == Some(compose::REFILL_REFUSED))
+        {
+            notice.set(None);
         }
     });
 

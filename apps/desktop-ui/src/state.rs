@@ -77,6 +77,15 @@ pub enum Overlay {
     },
 }
 
+/// Edit on a queued send: the composer discards it and takes its text, or refuses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refill {
+    pub account_id: Uuid,
+    pub conversation_id: Uuid,
+    pub id: Uuid,
+    pub body: String,
+}
+
 #[derive(Clone, Copy)]
 pub struct Ctx {
     pub sidebar: RwSignal<SidebarView>,
@@ -111,8 +120,8 @@ pub struct Ctx {
     pub prefs: RwSignal<UiPrefs>,
     /// The window's inner width in CSS px.
     pub win_width: RwSignal<f64>,
-    /// Text to put back in a conversation's composer (editing a queued send).
-    pub refill: RwSignal<Option<(Uuid, String)>>,
+    /// A queued send to move back into its conversation's composer, if the composer is empty.
+    pub refill: RwSignal<Option<Refill>>,
     /// Seconds tick, for reconnect countdowns.
     pub now: RwSignal<f64>,
     /// A one-off message for the whole window, dismissed by the user.
