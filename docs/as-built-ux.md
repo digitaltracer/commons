@@ -63,3 +63,55 @@ Built against the UX review proposal and the user's decisions of 2026-11-19. Pac
 ## Left
 - Not checked by hand in the real app: dragging and moving the window with the mouse before quitting, the traffic lights on a restored window, notifications from a second live client while the window is in the background, Escape and ⌥-arrows with a real keyboard, pointer drags on the pane handles, and VoiceOver reading the separators, rows and live region.
 - Drafts are not cleared when a conversation is purged; they come back if access does.
+
+# Package 7: composer v2 (2026-11-19)
+
+Live Markdown in the composer, staged uploads (B8), `:emoji:` and a searchable picker (B10), and `#channel` (B11). Built to the proposal's package 7 and the user's decision that emphasis in the composer is colour only.
+
+## Built
+
+**Live Markdown (the highlight layer)**
+- The textarea is still the only input. Behind it, a layer draws the same text with the same font, padding and wrapping, and the textarea's own text is transparent with a visible caret. The layer takes the textarea's client size, so a scrollbar can't change where lines wrap, and follows its scroll offset to the fraction of a pixel.
+- `proto::markdown::highlight(source, entities)` returns byte ranges and styles from the renderer's own parser, options and entity placement: dimmed markers (`**`, `_`, backticks, `~~`, fences, `>`, list markers, heading `#`s, link brackets and targets), strong, emphasis and strike text, inline code, whole code blocks, links (bare URLs included, as the renderer linkifies them), and mention and channel-link tints. Nothing is styled inside code. It takes the draft's entities as well as its text, so a picked name's underscores are never read as emphasis, just as the renderer treats them.
+- Colour and background only. Strong is the accent text colour, emphasis a muted blue, strike the tertiary grey, markers a dim grey (`--hlmark`, `--hlem`). A code block gets a full-width shaded box drawn under the text, outside its flow. Kerning and ligatures are turned off in both the textarea and the layer, so a style boundary can never move a glyph.
+- The field's value is written only when it differs from the text, so typing and IME composition are never interrupted. Autocomplete picks and the formatting buttons type through `insertText`, so they join the field's undo stack.
+
+**Staged uploads (B8)**
+- Attach opens a picker for several files. Pasting files (a screenshot, or files copied in Finder) and dropping files on the window stage them too. Each file is a chip with its size, upload progress, Retry when it failed, and Remove.
+- Send queues the text and every staged file as one message. Files alone send with an empty body. At most ten files per message, the server's limit.
+- Outbox rule: uploads still go straight to the server as they are staged, not through the outbox. While a file is uploading or has failed, Send doesn't send: it says why ("Wait for the files to finish uploading", "Remove or retry the file that didn't upload") and keeps the text. The core refuses the same cases. Files that finished uploading send offline like any message, through the outbox. A file staged offline fails with "Couldn't reach the server" and can be retried.
+- Staged files belong to the composer they were staged in (conversation and thread), and survive switching conversations and reloading the webview. They live in the core's memory, so a restart drops them, and the server keeps their unsent uploads, as it does for any upload that's never sent. Pasted bytes are copied to the account's `staged-uploads` folder so a failed upload can be retried, deleted when the file is sent or removed, and cleared at start.
+- File paths never reach the webview. The picker stages files in the shell. Tauri handles native drops (the webview's own drop events carry no files), and the shell keeps the paths under a drop id that the UI claims for the composer under the drop point, or else the open conversation's composer. Pasted files cross the bridge as raw bytes, with their names percent-encoded in headers.
+
+**`:emoji:` and the picker (B10)**
+- A colon and two letters at the start of a word suggest emoji by shortcode, then by the words of their names (the data-only `emojis` crate has names and GitHub shortcodes, not CLDR keywords). Shorter shortcodes come first within a rank, so `:ta` offers 🌮 and 🎉 before 🍊. Not inside code, and not for times like 10:30. The arrow keys choose, Return or Tab inserts the emoji, Escape closes.
+- The picker opens on a search field. The arrow keys move through an eight-column grid, Up from the top row goes back to the field, typing in the grid goes on in the field, and Return in the field picks the first result. It announces the number of results, and gives focus back to whatever opened it.
+- Suggestion lists are tied to the field with `aria-controls` and `aria-activedescendant`, and close when the field loses focus.
+
+**`#channel` (B11)**
+- `#` at the start of a word suggests the workspace's channels the user is in: name prefix first, then a word of the name, then anywhere. Picking one inserts `#name` and sends a channel-link entity for it while the text stays. `# ` still starts a heading. The core's mention merge keeps picked channel links that cover a `#name`, and the server already validates them.
+
+## Decisions and deviations
+- `highlight` takes the entities as well as the source (`highlight(source, entities)`), so tints and emphasis match `render_with_entities`.
+- Mentions are tinted when they were picked from autocomplete. A name typed out in full is still found by the core at send time and renders as a mention, but the composer doesn't tint it.
+- Send waits rather than sending later on its own. The board's hint "Sends when the upload finishes" would need a held send that could outlive the composer, or fail after its text was cleared.
+- No CLDR keywords: the `emojis` crate doesn't carry them, and name words cover most searches.
+- The emoji grid's cells are buttons in labelled groups rather than ARIA grid cells, since there are no rows.
+- The textarea still grows by logical lines (up to eight), so one long wrapped line scrolls inside a short field, as before.
+
+## Checks
+- Proto tests for `highlight`: emphasis markers and text, fences as one block with marked fences (open and closed), inline code with its backticks only, quote, list and heading markers, safe, unsafe and bare links, raw HTML left plain, mentions and channels tinted but not inside code, and offsets on character boundaries with CJK, emoji and accented text.
+- Core tests: staging two files from disk and a pasted one, a failed upload (over the server's size limit) holding the send, retry and removal, one message carrying all three attachments in order, the pasted copy deleted, a thread's composer kept apart, files alone sending, and the ten-file limit. Picked channel links survive the mention merge and reach the server.
+- Desktop UI tests: emoji and channel queries (times, words, code, headings), channel ranking, picks turning into entities only while their text is whole, layer painting, emoji search ranking, grid keys, the send rule, the paste rule, and chip text.
+- Browser harness (Chrome, Tauri IPC stubbed, with staging added to the stub):
+  - drift: with the textarea's own text made red and translucent, it sat exactly on the layer's text across bold, code, links, Japanese, Arabic, emoji with ZWJ sequences, a long URL breaking mid-word, and a wrapped paragraph, also scrolled to the bottom;
+  - speed: 10,000 characters of mixed Markdown, inserting in the middle took a median of 5.7 ms and at most 7.9 ms per keystroke, layer render included, in a debug WASM build;
+  - undo and redo stepped back through typing and an autocomplete pick (`@Priya Nair ` back to `@pri`); the spellcheck underline showed through the transparent text;
+  - `:ta` with arrows and Return, the picker by keyboard only (search, arrows, Return, focus back to the composer and to the reaction button), `#eng` with Tab inserting `#engineering` and sending the channel-link entity at the right offsets, the light and dark tokens;
+  - staging: two picked files, two pasted files (one name with a non-ASCII character), progress, Send refused with the text kept, Retry, one message with all four attachments; drops on the thread composer and on the message list landing in the right composers; chips kept across switching conversations. Escape was checked by dispatching the key, because the Chrome tool's Escape blurs the window.
+
+- The real app was built with `cargo xtask app` and launched with a throwaway `HOME`. Its UI booted with no warnings or errors in the log. It wasn't driven further.
+
+## Left
+- Not checked in the real app (this session can't drive native windows): IME composition (Japanese, Pinyin), autocorrect, VoiceOver reading the field and suggestion lists, native drag and drop from Finder, pasting a Finder copy in WKWebView, and the picker dialog with several files. The IME path relies on the field's value never being rewritten while it matches, which the harness confirmed for typing but not for marked text.
+- Staged files are lost on restart, and the server never reclaims unsent uploads.
