@@ -360,7 +360,14 @@ impl Ctx {
         })
     }
 
-    pub fn open_dm(&self, account_id: Uuid, workspace_id: Uuid, user_ids: Vec<Uuid>) {
+    /// Opens, or starts, the conversation with these people. A refusal goes to `on_error`.
+    pub fn open_dm(
+        &self,
+        account_id: Uuid,
+        workspace_id: Uuid,
+        user_ids: Vec<Uuid>,
+        on_error: impl Fn(String) + 'static,
+    ) {
         let this = *self;
         leptos::task::spawn_local(async move {
             let args =
@@ -370,7 +377,7 @@ impl Ctx {
                     this.overlay.set(Overlay::None);
                     this.open_when_cached(account_id, c.id);
                 }
-                Err(e) => ipc::warn(e),
+                Err(e) => on_error(e),
             }
         });
     }

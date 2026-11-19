@@ -328,7 +328,7 @@ pub fn Jump() -> impl IntoView {
                 account_id,
                 workspace_id,
                 user_id,
-            } => c.open_dm(account_id, workspace_id, vec![user_id]),
+            } => c.open_dm(account_id, workspace_id, vec![user_id], ipc::warn),
             Target::Join {
                 account_id,
                 conversation_id,

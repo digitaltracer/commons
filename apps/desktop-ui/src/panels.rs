@@ -210,7 +210,7 @@ pub fn Members(sel: Selection) -> impl IntoView {
             let mut ids = cv.peer_ids.clone();
             ids.push(user_id);
             c.aside.set(Aside::None);
-            c.open_dm(sel.account_id, w.id, ids);
+            c.open_dm(sel.account_id, w.id, ids, ipc::warn);
             return;
         }
         leptos::task::spawn_local(async move {
@@ -483,10 +483,27 @@ pub fn Person(account_id: Uuid, user_id: Uuid) -> impl IntoView {
             <footer class="dfoot">
                 {(!me).then(|| view! {
                     <button class="btn primary" disabled=ws.is_none()
-                        on:click=move |_| if let Some(ws) = ws { c.open_dm(account_id, ws, vec![user_id]) }>"Message"</button>
+                        on:click=move |_| if let Some(ws) = ws { c.open_dm(account_id, ws, vec![user_id], ipc::warn) }>"Message"</button>
                 })}
             </footer>
         </Dialog>
+    }
+}
+
+/// The most other people a group conversation can have; the server refuses more.
+const MAX_GROUP_OTHERS: usize = 8;
+
+/// Whether `id` can be ticked in the people picker: it already is, or there's room.
+fn can_pick(chosen: &[Uuid], id: Uuid) -> bool {
+    chosen.contains(&id) || chosen.len() < MAX_GROUP_OTHERS
+}
+
+/// The people picker's footer, which keeps the limit in view.
+fn picked_label(n: usize) -> String {
+    match n {
+        0 => "Pick one person, or up to eight for a group".into(),
+        n if n >= MAX_GROUP_OTHERS => format!("{n} selected · the most a group can have"),
+        n => format!("{n} selected · up to eight"),
     }
 }
 
@@ -603,6 +620,7 @@ pub fn Tools(account_id: Uuid, workspace_id: Uuid, which: Overlay) -> impl IntoV
                                 let uid = m.user_id;
                                 view! { <li class="mrow"><label class="mperson">
                                     <input type="checkbox" prop:checked=move || chosen.with(|c| c.contains(&uid))
+                                        disabled=move || !chosen.with(|c| can_pick(c, uid))
                                         on:change=move |ev| chosen.update(|c| if event_target_checked(&ev) { c.push(uid) } else { c.retain(|x| *x != uid) }) />
                                     {avatar(uid, &m.display_name, "m")}<span class="mname">{m.display_name.clone()}</span>
                                     {move || presence_dot(c.online(account_id, uid))}</label></li> }
@@ -612,9 +630,14 @@ pub fn Tools(account_id: Uuid, workspace_id: Uuid, which: Overlay) -> impl IntoV
                     {err}
                 </div>
                 <footer class="dfoot">
-                    <span class="muted">{move || match chosen.with(|c| c.len()) { 0 => "Pick one person, or up to eight for a group".to_string(), n => format!("{n} selected") }}</span>
+                    <span class="muted">{move || picked_label(chosen.with(|c| c.len()))}</span>
                     <button class="btn primary" disabled=move || chosen.with(|c| c.is_empty())
-                        on:click=move |_| c.open_dm(account_id, workspace_id, chosen.get_untracked())>"Start"</button>
+                        on:click=move |_| {
+                            error.set(None);
+                            c.open_dm(account_id, workspace_id, chosen.get_untracked(), move |e| {
+                                error.try_set(Some(e));
+                            })
+                        }>"Start"</button>
                 </footer>
             </Dialog>
         }.into_any(),
@@ -1173,7 +1196,20 @@ pub fn JoinInvite() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::{DialogKey, dialog_key, looks_like_email};
+    use super::{DialogKey, can_pick, dialog_key, looks_like_email, picked_label};
+    use uuid::Uuid;
+
+    #[test]
+    fn a_group_stops_at_eight_other_people() {
+        let eight: Vec<Uuid> = (1..=8).map(Uuid::from_u128).collect();
+        let (ninth, first) = (Uuid::from_u128(9), eight[0]);
+        assert!(can_pick(&eight[..7], ninth));
+        assert!(!can_pick(&eight, ninth));
+        // A ticked person can always be unticked.
+        assert!(can_pick(&eight, first));
+        assert!(picked_label(3).contains("up to eight"));
+        assert!(picked_label(8).contains("the most"));
+    }
 
     #[test]
     fn escape_closes_a_dialog_from_anywhere_unless_a_control_used_it() {
