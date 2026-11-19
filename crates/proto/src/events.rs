@@ -260,6 +260,12 @@ pub enum ServerFrame {
         user_id: Uuid,
         online: bool,
     },
+    /// Who is online in a workspace, sent once this socket receives its presence frames, so
+    /// no change can fall between this list and the frames that follow it.
+    Online {
+        workspace_id: Uuid,
+        user_ids: Vec<Uuid>,
+    },
     Typing {
         workspace_id: Uuid,
         conversation_id: Uuid,

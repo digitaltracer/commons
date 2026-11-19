@@ -676,6 +676,16 @@ impl Account {
                 };
                 (self.events)(self.id, AccountEvent::Presence { online: list });
             }
+            ServerFrame::Online { user_ids, .. } => {
+                let list = match self.online.lock() {
+                    Ok(mut set) => {
+                        set.extend(user_ids);
+                        set.iter().copied().collect()
+                    }
+                    Err(_) => vec![],
+                };
+                (self.events)(self.id, AccountEvent::Presence { online: list });
+            }
             ServerFrame::Typing {
                 conversation_id,
                 user_id,
@@ -766,7 +776,8 @@ impl Account {
         result
     }
 
-    /// Seeds presence with who is online now; socket frames keep it current from here.
+    /// Seeds presence with who is online now; socket frames keep it current from here. A
+    /// server that sends `Online` lists closes the gap this request can leave open.
     async fn load_presence(&self) {
         let Ok(workspaces) = self.store.workspaces() else {
             return;

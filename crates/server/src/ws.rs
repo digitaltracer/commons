@@ -52,6 +52,20 @@ struct Session {
 }
 
 impl Session {
+    /// Call after the hub delivers these workspaces' presence to this socket: anyone who
+    /// comes or goes later arrives as a presence frame after this list.
+    async fn send_online(&mut self, workspaces: &[Uuid]) -> Result<(), Stop> {
+        for &workspace_id in workspaces {
+            let user_ids = self.state.hub.online_in(workspace_id);
+            self.send(&ServerFrame::Online {
+                workspace_id,
+                user_ids,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn send(&mut self, frame: &ServerFrame) -> Result<(), Stop> {
         let text = serde_json::to_string(frame).map_err(|_| Stop::Disconnect)?;
         self.send_text(text).await
@@ -367,6 +381,7 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
         if state.hub.connections(user_id) == 1 {
             publish_presence(&state, user_id, &ws_ids, true).await;
         }
+        session.send_online(&ws_ids).await?;
         loop {
             let mut before: Vec<Uuid> = session.workspaces.keys().copied().collect();
             before.sort();
@@ -395,7 +410,12 @@ async fn run(state: AppState, auth: AuthUser, socket: WebSocket) {
             let mut after: Vec<Uuid> = session.workspaces.keys().copied().collect();
             after.sort();
             if after != before {
-                state.hub.set_workspaces(reg.id, after);
+                state.hub.set_workspaces(reg.id, after.clone());
+                let added: Vec<Uuid> = after
+                    .into_iter()
+                    .filter(|w| before.binary_search(w).is_err())
+                    .collect();
+                session.send_online(&added).await?;
             }
         }
     }
