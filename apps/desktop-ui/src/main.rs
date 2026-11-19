@@ -5,6 +5,7 @@ mod app;
 mod compose;
 mod emoji;
 mod ipc;
+mod layout;
 mod markdown;
 mod messages;
 mod panels;

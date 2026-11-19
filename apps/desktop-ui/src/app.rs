@@ -8,6 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::ipc;
+use crate::layout::{self, Grip, Pane};
 use crate::messages::{Composer, MessageList, focus_composer};
 use crate::panels::{
     InvitePeople, JoinInvite, Members, Person, Prefs, SESSION_PASSWORD, SessionCard, SignInAgain,
@@ -173,6 +174,32 @@ pub fn App() -> impl IntoView {
     });
     set_active(visible() && document().has_focus().unwrap_or(true));
 
+    leptos::task::spawn_local(async move {
+        if let Ok(p) = ipc::invoke::<proto::view::UiPrefs>("ui_prefs", json!({})).await {
+            c.prefs.set(p);
+        }
+    });
+    let _resize = window_event_listener(leptos::ev::resize, move |_| {
+        if let Some(w) = window().inner_width().ok().and_then(|v| v.as_f64()) {
+            c.win_width.set(w);
+        }
+    });
+    let layout_vars = move || {
+        let p = c.prefs.get();
+        let w = c.win_width.get();
+        format!(
+            "--sw: {}px; --tw: {}px",
+            layout::sidebar_width(p, w),
+            p.thread()
+        )
+    };
+    let aside_open = move || {
+        c.mode.get() == Mode::Conversation
+            && c.selected.get().is_some()
+            && c.aside.get() != Aside::None
+    };
+    let narrow = move || layout::thread_overlays(c.prefs.get(), c.win_width.get());
+
     let _tick = set_interval_with_handle(
         move || c.now.set(js_sys::Date::now()),
         std::time::Duration::from_secs(1),
@@ -239,12 +266,16 @@ pub fn App() -> impl IntoView {
         <Show when=move || loaded.get() fallback=|| view! { <div class="win"><p class="empty">"Loading…"</p></div> }>
             <Show when=move || !c.sidebar.with(|s| s.accounts.is_empty()) && !c.adding.get()
                   fallback=move || view! { <SignIn /> }>
-                <div class="win">
+                <div class="win" style=layout_vars>
                     <div class="left">
-                        <div class="tb" data-tauri-drag-region></div>
-                        <div class="cols">
+                        <div class="railcol">
+                            <div class="tb" data-tauri-drag-region></div>
                             <Rail />
+                        </div>
+                        <div class="sidecol">
+                            <div class="tb" data-tauri-drag-region></div>
                             <Side />
+                            <Grip pane=Pane::Sidebar />
                         </div>
                     </div>
                     {move || match (c.mode.get(), c.place.get()) {
@@ -255,11 +286,20 @@ pub fn App() -> impl IntoView {
                             None => view! { <Empty /> }.into_any(),
                         },
                     }}
-                    {move || match (c.mode.get(), c.selected.get(), c.aside.get()) {
-                        (Mode::Conversation, Some(sel), Aside::Thread(root)) => view! { <Thread sel=sel root=root /> }.into_any(),
-                        (Mode::Conversation, Some(sel), Aside::Members) => view! { <Members sel=sel /> }.into_any(),
-                        _ => ().into_any(),
-                    }}
+                    <Show when=aside_open>
+                        // Too narrow for both columns: the panel floats over the messages.
+                        {move || narrow().then(|| view! {
+                            <div class="ascrim" aria-hidden="true" on:click=move |_| c.aside.set(Aside::None)></div>
+                        })}
+                        <div class="asidewrap" class:over=narrow>
+                            {move || (!narrow()).then(|| view! { <Grip pane=Pane::Thread /> })}
+                            {move || match (c.selected.get(), c.aside.get()) {
+                                (Some(sel), Aside::Thread(root)) => view! { <Thread sel=sel root=root /> }.into_any(),
+                                (Some(sel), Aside::Members) => view! { <Members sel=sel /> }.into_any(),
+                                _ => ().into_any(),
+                            }}
+                        </div>
+                    </Show>
                     {move || overlay(c.overlay.get())}
                 </div>
             </Show>

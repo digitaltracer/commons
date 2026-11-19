@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use leptos::prelude::*;
 use proto::model::{ConversationKind, Role};
 use proto::view::{
-    AccountView, ConnectionState, ConversationView, DraftView, MessageView, SidebarView,
+    AccountView, ConnectionState, ConversationView, DraftView, MessageView, SidebarView, UiPrefs,
     WorkspaceView,
 };
 use serde_json::json;
@@ -101,6 +101,10 @@ pub struct Ctx {
     pub anchors: StoredValue<HashMap<(Uuid, Option<Uuid>), Anchor>>,
     /// The window is focused and visible.
     pub active: RwSignal<bool>,
+    /// Pane sizes, kept by the core.
+    pub prefs: RwSignal<UiPrefs>,
+    /// The window's inner width in CSS px.
+    pub win_width: RwSignal<f64>,
     /// Text to put back in a conversation's composer (editing a queued send).
     pub refill: RwSignal<Option<(Uuid, String)>>,
     /// Seconds tick, for reconnect countdowns.
@@ -139,6 +143,13 @@ impl Ctx {
             keyboard_open: StoredValue::new(false),
             anchors: StoredValue::new(HashMap::new()),
             active: RwSignal::new(true),
+            prefs: RwSignal::new(UiPrefs::default()),
+            win_width: RwSignal::new(
+                web_sys::window()
+                    .and_then(|w| w.inner_width().ok())
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1280.0),
+            ),
             refill: RwSignal::new(None),
             now: RwSignal::new(js_sys::Date::now()),
             notice: RwSignal::new(None),

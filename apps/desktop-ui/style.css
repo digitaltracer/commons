@@ -1,7 +1,7 @@
 /* Commons desktop. Light and dark themes are CSS variables; the system font stack throughout.
    Plain flex layout and solid fills only: no blur, so the layout ports to a native toolkit. */
 :root {
-  --win: #FFFFFF; --side: #ECEEEC; --line: #E1E4E2; --line2: #D3D8D5;
+  --win: #FFFFFF; --side: #F4F5F4; --rail: #E8EBE9; --line: #E1E4E2; --line2: #D3D8D5;
   --text: #1B1E1C; --text2: #525955; --text3: #636A66; --hover: rgba(20,30,25,.05);
   --sel: #1F6F55; --seltext: #FFFFFF; --accent: #1F6F55; --onaccent: #FFFFFF;
   --accentsoft: #E1F0E9; --accenttext: #175A45; --me: #FFF6DC; --metext: #6E4500;
@@ -15,7 +15,7 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --win: #1A1C1B; --side: #232625; --line: #2E3230; --line2: #3B403D;
+    --win: #1A1C1B; --side: #1F2221; --rail: #141615; --line: #2E3230; --line2: #3B403D;
     --text: #E7EAE8; --text2: #A9B1AC; --text3: #969E99; --hover: rgba(255,255,255,.05);
     --sel: #2A7A5E; --seltext: #FFFFFF; --accent: #5DC69B; --onaccent: #0E1F18;
     --accentsoft: #1E3A2F; --accenttext: #8FDDBA; --me: #2E2610; --metext: #F4CB72;
@@ -47,26 +47,37 @@ a { color: var(--accent); }
 
 /* Window */
 .win { position: relative; display: flex; width: 100vw; height: 100vh; overflow: hidden; background: var(--win); }
-.left { width: 320px; flex: none; display: flex; flex-direction: column; background: var(--side); border-right: 1px solid var(--line); }
+.left { flex: none; display: flex; border-right: 1px solid var(--line); }
+.railcol { width: 64px; flex: none; display: flex; flex-direction: column; background: var(--rail); }
+.sidecol { width: var(--sw, 256px); flex: none; display: flex; flex-direction: column; background: var(--side); position: relative; }
 .tb { height: 52px; flex: none; }
-.cols { flex: 1; min-height: 0; display: flex; }
+
+/* Pane handles: a hairline that lights up, wide enough to grab. */
+.grip { position: absolute; top: 0; bottom: 0; right: -5px; width: 9px; z-index: 5; display: flex; justify-content: center; cursor: col-resize; touch-action: none; }
+.grip.thr { right: auto; left: -5px; }
+.grip .ln { width: 2px; height: 100%; background: transparent; transition: background .12s; }
+.grip:hover .ln, .grip:focus-visible .ln, .grip.hot .ln { background: var(--accent); }
+.grip:focus-visible { outline: 0; }
+.tip { position: absolute; left: 14px; top: 50%; margin-top: -14px; white-space: nowrap; height: 28px; display: flex; align-items: center; padding: 0 10px; border-radius: 7px; background: var(--text); color: var(--win); font-size: 12px; font-weight: 600; pointer-events: none; }
+.grip.thr .tip { left: auto; right: 14px; }
+@media (prefers-reduced-motion: reduce) { .grip .ln { transition: none; } }
 
 /* Rail */
-.rail { width: 68px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 10px;
-  padding: 2px 0 14px; border-right: 1px solid var(--line); overflow-y: auto; }
+.rail { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 2px 0 14px; overflow-y: auto; }
 .srv { display: flex; flex-direction: column; gap: 8px; padding: 6px; border-radius: 14px; background: var(--hover); }
 .ws { position: relative; width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center;
   justify-content: center; font-weight: 700; font-size: 14px; color: #fff; flex: none; text-align: center; }
-.ws.on { box-shadow: 0 0 0 2px var(--side), 0 0 0 4px var(--accent); }
+.ws.on { box-shadow: 0 0 0 2px var(--rail), 0 0 0 4px var(--accent); }
 .ws.out .wt { opacity: .55; }
 .ws.sm { width: 30px; height: 30px; border-radius: 8px; font-size: 11.5px; }
 .ws.ghost { background: var(--chip); color: var(--text2); }
 .wbadge { position: absolute; top: -5px; right: -6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
   background: var(--badge); color: #fff; font-size: 11px; font-weight: 700; display: flex; align-items: center;
-  justify-content: center; box-shadow: 0 0 0 2px var(--side); }
-.wdot { position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 2px var(--side); }
+  justify-content: center; box-shadow: 0 0 0 2px var(--rail); }
+.wdot { position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 2px var(--rail); }
 .woff, .wlock { position: absolute; bottom: -4px; right: -5px; width: 18px; height: 18px; border-radius: 50%; color: #fff;
-  display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px var(--side); }
+  display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px var(--rail); }
 .woff { background: var(--off); }
 .wlock { background: var(--off); }
 .woff .i, .wlock .i { stroke-width: 2.6; }
@@ -281,7 +292,10 @@ a { color: var(--accent); }
 .emo:hover, .emo:focus-visible { background: var(--hover); }
 
 /* Thread and members panels */
-.thread { width: 400px; flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; background: var(--win); }
+.asidewrap { flex: none; display: flex; position: relative; }
+.asidewrap.over { position: absolute; top: 0; right: 0; bottom: 0; z-index: 20; box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 12px 32px rgba(0,0,0,.18); }
+.ascrim { position: absolute; left: calc(65px + var(--sw, 256px)); top: 0; right: 0; bottom: 0; z-index: 19; background: var(--scrim); }
+.thread { width: var(--tw, 380px); flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; background: var(--win); }
 .thread .msg { padding: 8px 16px; }
 .thread .actions { right: 16px; }
 .thread .comp { margin: 0 16px; }
