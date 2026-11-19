@@ -155,14 +155,18 @@ fn keep_minimum(window: &tauri::Window, size: tauri::PhysicalSize<u32>) {
     }
 }
 
+/// Two rustls backends are linked (ring from the updater, aws-lc-rs from reqwest), so rustls cannot choose one itself.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    // Two rustls backends are linked, so rustls cannot choose one itself.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    install_crypto_provider();
     let spike_mode = std::env::var("COMMONS_SPIKE").is_ok_and(|v| v == "1");
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -237,4 +241,17 @@ fn main() {
         .invoke_handler(commands::handler())
         .run(tauri::generate_context!())
         .expect("error while running Commons");
+}
+
+#[cfg(test)]
+mod tests {
+    // Without a chosen provider each of these panics, as the first HTTPS connection did.
+    #[test]
+    fn tls_clients_build_after_startup() {
+        super::install_crypto_provider();
+        let _http = client_core::transport::HttpTransport::new("https://commons.invalid");
+        let _socket = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+    }
 }
