@@ -394,6 +394,7 @@ a { color: var(--accent); }
 .scrim { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: var(--scrim); z-index: 40; }
 .pop { position: absolute; z-index: 41; border-radius: 12px; background: var(--pop); border: 1px solid var(--line2); box-shadow: 0 12px 32px rgba(0,0,0,.18); overflow: hidden; display: flex; flex-direction: column; max-height: calc(100vh - 80px); }
 .dlg { left: 50%; top: 72px; width: 460px; transform: translateX(-50%); }
+.dlg:focus { outline: 0; }
 .dhead { display: flex; align-items: center; gap: 8px; padding: 12px 12px 8px 16px; }
 .dhead h2 { flex: 1; margin: 0; font-size: 15px; }
 .dbody { padding: 4px 16px 12px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }

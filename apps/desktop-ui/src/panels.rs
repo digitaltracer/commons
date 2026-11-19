@@ -4,20 +4,146 @@ use proto::model::{Conversation, ConversationKind, Member, NotifyLevel, Preferen
 use proto::view::{AccountView, ConnectionState, SessionEnd};
 use serde_json::json;
 use uuid::Uuid;
+use wasm_bindgen::JsCast;
 
 use crate::ipc;
 use crate::state::{Aside, Overlay, Selection, ctx, is_dm};
 use crate::ui::{self, Icon, avatar, icon, sized};
 
-/// A modal dialog over a scrim. Escape or a click on the scrim closes it.
+/// What Tab can reach inside a dialog.
+const TABBABLE: &str = "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), \
+    select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+
+/// What a key does while a dialog is open.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DialogKey {
+    Close,
+    /// Focus the tab stop at this index.
+    Focus(usize),
+    /// Keep focus where it is: there is nothing to Tab to.
+    Hold,
+    /// Leave the key to the browser and the focused control.
+    Pass,
+}
+
+/// Escape closes from anywhere unless a control used it. Tab wraps around the dialog's `stops`;
+/// `at` is the focused stop, None when focus is on the dialog itself or outside it.
+pub(crate) fn dialog_key(
+    key: &str,
+    shift: bool,
+    used: bool,
+    stops: usize,
+    at: Option<usize>,
+) -> DialogKey {
+    match key {
+        "Escape" if !used => DialogKey::Close,
+        "Tab" if stops == 0 => DialogKey::Hold,
+        "Tab" => match (at, shift) {
+            (None, false) => DialogKey::Focus(0),
+            (None, true) | (Some(0), true) => DialogKey::Focus(stops - 1),
+            (Some(i), false) if i + 1 >= stops => DialogKey::Focus(0),
+            _ => DialogKey::Pass,
+        },
+        _ => DialogKey::Pass,
+    }
+}
+
+fn tab_stops(root: &web_sys::Element) -> Vec<web_sys::HtmlElement> {
+    let Ok(list) = root.query_selector_all(TABBABLE) else {
+        return vec![];
+    };
+    (0..list.length())
+        .filter_map(|i| list.item(i))
+        .filter_map(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+        .filter(|e| e.get_client_rects().length() > 0)
+        .collect()
+}
+
+/// Puts focus inside `root` unless it is already there: on a field marked `autofocus`, or
+/// else on the dialog itself, so a Return can't trigger its first button by accident.
+fn focus_into(root: &web_sys::HtmlElement) {
+    let active = document().active_element();
+    if active.is_some_and(|a| root.contains(Some(a.as_ref()))) {
+        return;
+    }
+    match root
+        .query_selector("[autofocus]")
+        .ok()
+        .flatten()
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        Some(e) => {
+            let _ = e.focus();
+        }
+        None => {
+            let _ = root.focus();
+        }
+    }
+}
+
+/// A modal dialog over a scrim. It takes focus when it opens and keeps Tab inside; Escape
+/// or a click on the scrim closes it, and focus goes back to where it was.
 #[component]
 pub fn Dialog(#[prop(into)] label: String, children: Children) -> impl IntoView {
     let c = ctx();
     let aria = label.clone();
+    let section: NodeRef<leptos::html::Section> = NodeRef::new();
+    let opener = StoredValue::new_local(document().active_element());
+    Effect::new(move |_| {
+        if let Some(s) = section.get() {
+            // After the children's own focus effects, which win.
+            ipc::next_frame(move || focus_into(&s));
+        }
+    });
+    let keys = window_event_listener(leptos::ev::keydown, move |ev| {
+        let Some(s) = section.get_untracked() else {
+            return;
+        };
+        let stops = tab_stops(&s);
+        let active = document().active_element();
+        let at = active
+            .as_ref()
+            .and_then(|a| stops.iter().position(|e| e.is_same_node(Some(a.as_ref()))));
+        match dialog_key(
+            &ev.key(),
+            ev.shift_key(),
+            ev.default_prevented(),
+            stops.len(),
+            at,
+        ) {
+            DialogKey::Close => {
+                ev.prevent_default();
+                c.overlay.set(Overlay::None);
+            }
+            DialogKey::Focus(i) => {
+                ev.prevent_default();
+                let _ = stops[i].focus();
+            }
+            DialogKey::Hold => ev.prevent_default(),
+            DialogKey::Pass => {}
+        }
+    });
+    // Focus moved out from code, such as a composer focusing itself: bring it back.
+    let held = window_event_listener(leptos::ev::focusin, move |ev| {
+        if let Some(s) = section.get_untracked()
+            && let Some(t) = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+            && !s.contains(Some(&t))
+        {
+            // Not from inside this handler: the focus change would call it again.
+            queue_microtask(move || focus_into(&s));
+        }
+    });
+    on_cleanup(move || {
+        keys.remove();
+        held.remove();
+        ui::give_back_focus(
+            opener.try_update_value(|o| o.take()).flatten(),
+            section.get_untracked().map(Into::into),
+        );
+    });
     view! {
         <div class="scrim" on:click=move |_| c.overlay.set(Overlay::None)></div>
-        <section class="pop dlg" role="dialog" aria-modal="true" aria-label=aria
-            on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); c.overlay.set(Overlay::None) }>
+        <section class="pop dlg" role="dialog" aria-modal="true" aria-label=aria tabindex="-1" node_ref=section>
             <header class="dhead">
                 <h2>{label}</h2>
                 <button class="iconbtn" aria-label="Close" on:click=move |_| c.overlay.set(Overlay::None)>{icon(Icon::Close)}</button>
@@ -1022,7 +1148,42 @@ pub fn JoinInvite() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_email;
+    use super::{DialogKey, dialog_key, looks_like_email};
+
+    #[test]
+    fn escape_closes_a_dialog_from_anywhere_unless_a_control_used_it() {
+        // Focus inside, on the dialog itself, or left behind in a composer: all close.
+        for at in [Some(1), None] {
+            assert_eq!(dialog_key("Escape", false, false, 3, at), DialogKey::Close);
+        }
+        assert_eq!(
+            dialog_key("Escape", false, true, 3, Some(0)),
+            DialogKey::Pass
+        );
+        assert_eq!(dialog_key("Enter", false, false, 3, None), DialogKey::Pass);
+    }
+
+    #[test]
+    fn tab_wraps_inside_a_dialog() {
+        assert_eq!(
+            dialog_key("Tab", false, false, 3, Some(2)),
+            DialogKey::Focus(0)
+        );
+        assert_eq!(
+            dialog_key("Tab", true, false, 3, Some(0)),
+            DialogKey::Focus(2)
+        );
+        // From the dialog itself or from behind it, Tab enters at the edge.
+        assert_eq!(
+            dialog_key("Tab", false, false, 3, None),
+            DialogKey::Focus(0)
+        );
+        assert_eq!(dialog_key("Tab", true, false, 3, None), DialogKey::Focus(2));
+        // In between, the browser moves focus as usual.
+        assert_eq!(dialog_key("Tab", false, false, 3, Some(0)), DialogKey::Pass);
+        assert_eq!(dialog_key("Tab", true, false, 3, Some(2)), DialogKey::Pass);
+        assert_eq!(dialog_key("Tab", false, false, 0, None), DialogKey::Hold);
+    }
 
     #[test]
     fn an_invite_needs_something_like_an_email() {

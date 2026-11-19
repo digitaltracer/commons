@@ -301,6 +301,24 @@ pub async fn copy_text(text: &str) -> bool {
         .is_ok()
 }
 
+/// After a popup closes, puts focus back on `opener` if focus went with the popup (it was
+/// inside `popup`, or fell to the page). An action that focused something else wins.
+pub fn give_back_focus(opener: Option<web_sys::Element>, popup: Option<web_sys::Element>) {
+    use wasm_bindgen::JsCast;
+    let lost = document().active_element().is_none_or(|a| {
+        document()
+            .body()
+            .is_some_and(|b| b.is_same_node(Some(a.as_ref())))
+            || popup.is_some_and(|p| p.contains(Some(a.as_ref())))
+    });
+    if lost
+        && let Some(el) = opener.and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+        && el.is_connected()
+    {
+        let _ = el.focus();
+    }
+}
+
 /// Byte offset of a UTF-16 index, as text fields report caret positions.
 pub fn utf16_to_byte(s: &str, n: u32) -> usize {
     let mut units = 0u32;
