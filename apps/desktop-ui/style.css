@@ -466,6 +466,15 @@ mark { background: var(--mark); color: var(--marktext); border-radius: 3px; padd
 .signform h1 { margin: 0; font-size: 19px; }
 .signform .lede { margin: -6px 0 4px; color: var(--text2); font-size: 13px; }
 .signform .chk { font-size: 13px; }
+/* An invite the app was opened with: its server, what it offers, and a first-visit warning. */
+.invsum { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--side); font-size: 13px; }
+.invsum p { margin: 0; }
+.invsum .invhost { font-size: 16px; overflow-wrap: anywhere; }
+.invsum .muted { color: var(--text2); font-size: 12.5px; }
+.newserver { padding: 10px 12px; border: 1px solid var(--warnline); border-radius: 8px; background: var(--warn); color: var(--warntext); font-size: 12.5px; overflow-wrap: anywhere; }
+.dbody .invsum, .dbody .newserver { margin-bottom: 10px; }
+.pick { display: flex; flex-direction: column; gap: 6px; border: 0; margin: 0; padding: 0; }
+.pick legend { font-size: 12.5px; color: var(--text2); margin-bottom: 4px; }
 input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
 
 /* Provider sign-in, account settings and workspace admin. */

@@ -12,8 +12,8 @@ use crate::jump::{Jump, Shortcuts};
 use crate::layout::{self, Grip, Pane};
 use crate::messages::{Composer, MessageList, focus_composer};
 use crate::panels::{
-    InvitePeople, JoinInvite, Members, Person, Prefs, SESSION_PASSWORD, SessionCard, SignInAgain,
-    Tools,
+    InvitePeople, InviteSummary, JoinInvite, Members, Person, Prefs, SESSION_PASSWORD, SessionCard,
+    SignInAgain, Tools,
 };
 use crate::search::SearchView;
 use crate::settings::{AccountSettings, ProviderButton, WorkspaceAdmin, settings_button};
@@ -96,6 +96,7 @@ pub fn App() -> impl IntoView {
                 AppEvent::FilesDropped { drop_id, x, y } => {
                     crate::messages::claim_drop(c, drop_id, x, y)
                 }
+                AppEvent::InviteLinkOpened => c.take_opened_invite(),
             },
         )
         .await;
@@ -104,6 +105,8 @@ pub fn App() -> impl IntoView {
             c.sidebar.set(s);
         }
         loaded.set(true);
+        // The link that launched the app, if one did.
+        c.take_opened_invite();
         if let Ok(Some(v)) = ipc::invoke::<Option<String>>("update_ready", json!({})).await {
             update.set(Some(v));
         }
@@ -873,6 +876,7 @@ fn SignIn() -> impl IntoView {
     let busy = RwSignal::new(false);
     let invite = RwSignal::new(String::new());
     let can_cancel = move || !c.sidebar.with(|s| s.accounts.is_empty());
+    let opened = c.opened_invite;
     // A pasted link names its server; fill it in.
     let set_invite = move |pasted: String| {
         if let (Some(url), _) = proto::api::split_invite(&pasted) {
@@ -885,6 +889,20 @@ fn SignIn() -> impl IntoView {
         set_invite(link);
         register.set(true);
     }
+    // An invite the app was opened with fixes the server and the invite; the form shows what
+    // it is for instead of the two fields.
+    Effect::new(move |_| {
+        if let Some(o) = opened.get() {
+            server.set(o.server_url);
+            invite.set(o.token);
+            register.set(true);
+            error.set(None);
+        }
+    });
+    let leave_invite = move || {
+        opened.set(None);
+        invite.set(String::new());
+    };
     // Whether the server offers a provider, re-asked as the address settles.
     let provider = RwSignal::new(None::<String>);
     let oidc_busy = RwSignal::new(false);
@@ -893,6 +911,11 @@ fn SignIn() -> impl IntoView {
         let url = server.get();
         let n = asked.get_value() + 1;
         asked.set_value(n);
+        // An opened invite's preview already named it; a link sends nothing more until a click.
+        if let Some(o) = opened.get() {
+            provider.set(o.preview.oidc.map(|o| o.name));
+            return;
+        }
         provider.set(None);
         set_timeout(
             move || {
@@ -920,6 +943,7 @@ fn SignIn() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match ipc::invoke::<Uuid>("oidc_sign_in", args).await {
                 Ok(id) => {
+                    opened.set(None);
                     c.adding.set(false);
                     c.go_to_workspace(id, None);
                 }
@@ -941,6 +965,7 @@ fn SignIn() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match ipc::invoke::<Uuid>("add_account", args).await {
                 Ok(id) => {
+                    opened.set(None);
                     c.adding.set(false);
                     c.go_to_workspace(id, None);
                 }
@@ -954,14 +979,29 @@ fn SignIn() -> impl IntoView {
             <div class="tb" data-tauri-drag-region></div>
             <form class="signform card" on:submit=submit>
                 <div class="brand"><img class="logo" src="logo.png" alt="" />
-                    <h1>{move || if register.get() { "Create a Commons account" } else { "Sign in to Commons" }}</h1></div>
-                <p class="lede">"Use the address of your community's Commons server, or paste an invite link."</p>
-                <label class="flabel">"Invite link (optional)" <input class="field" placeholder="https://…/invite#…"
-                    prop:value=move || invite.get() on:input=move |ev| set_invite(event_target_value(&ev)) /></label>
-                <label class="flabel">"Server" <input class="field" type="url" required prop:value=move || server.get() on:input=move |ev| server.set(event_target_value(&ev)) /></label>
-                {move || provider.get().map(|p| view! {
-                    <ProviderButton name=p.clone() busy=oidc_busy label=format!("Continue with {p}") on_start=start_oidc />
-                    <div class="divider" role="separator"><span>"or with email"</span></div>
+                    <h1>{move || match (opened.with(|o| o.is_some()), register.get()) {
+                        (true, _) => "You're invited to Commons",
+                        (false, true) => "Create a Commons account",
+                        (false, false) => "Sign in to Commons",
+                    }}</h1></div>
+                {move || match opened.get() {
+                    Some(o) => view! {
+                        <InviteSummary new_server=o.accounts.is_empty() invite=o />
+                    }.into_any(),
+                    None => view! {
+                        <p class="lede">"Use the address of your community's Commons server, or paste an invite link."</p>
+                        <label class="flabel">"Invite link (optional)" <input class="field" placeholder="https://…/invite#…"
+                            prop:value=move || invite.get() on:input=move |ev| set_invite(event_target_value(&ev)) /></label>
+                        <label class="flabel">"Server" <input class="field" type="url" required prop:value=move || server.get() on:input=move |ev| server.set(event_target_value(&ev)) /></label>
+                    }.into_any(),
+                }}
+                {move || provider.get().map(|p| {
+                    let invited = opened.with(|o| o.is_some());
+                    let label = if invited { format!("Sign in with {p}") } else { format!("Continue with {p}") };
+                    view! {
+                        <ProviderButton name=p.clone() busy=oidc_busy label=label on_start=start_oidc />
+                        <div class="divider" role="separator"><span>{if invited { "or create a password" } else { "or with email" }}</span></div>
+                    }
                 })}
                 <label class="flabel">"Email" <input class="field" type="email" required autocomplete="username" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                 <label class="flabel">"Password" <input class="field" type="password" required minlength="8" autocomplete="current-password" prop:value=move || password.get() on:input=move |ev| password.set(event_target_value(&ev)) /></label>
@@ -971,8 +1011,11 @@ fn SignIn() -> impl IntoView {
                 </Show>
                 {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
                 <button type="submit" class="btn primary wide" disabled=move || busy.get() || oidc_busy.get()>{move || if register.get() { "Create account" } else { "Sign in" }}</button>
+                <Show when=move || opened.with(|o| o.is_some()) && !can_cancel()>
+                    <button type="button" class="btn wide" on:click=move |_| leave_invite()>"Use a different server"</button>
+                </Show>
                 <Show when=can_cancel>
-                    <button type="button" class="btn wide" on:click=move |_| c.adding.set(false)>"Cancel"</button>
+                    <button type="button" class="btn wide" on:click=move |_| { leave_invite(); c.adding.set(false) }>"Cancel"</button>
                 </Show>
             </form>
         </div>

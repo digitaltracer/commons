@@ -28,6 +28,7 @@ tauri-plugin-updater = "2"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 # The 2.5 line is the one built against Tauri 2.12.
 tauri-plugin-window-state = "~2.5"
+tauri-plugin-deep-link = "2"
 
 [features]
 # Set by `cargo tauri build`: serve the bundled frontend instead of the dev server.

@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use leptos::prelude::*;
 use proto::model::{ConversationKind, Role};
 use proto::view::{
-    AccountView, ConnectionState, ConversationView, DraftView, MessageView, SidebarView,
-    StagedFile, UiPrefs, WorkspaceView,
+    AccountView, ConnectionState, ConversationView, DraftView, MessageView, OpenedInvite,
+    SidebarView, StagedFile, UiPrefs, WorkspaceView,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -119,6 +119,8 @@ pub struct Ctx {
     pub notice: RwSignal<Option<String>>,
     /// An invite link to start the add-account form with.
     pub invite_link: RwSignal<Option<String>>,
+    /// An invite the app was opened with, for the sign-up form or the join panel.
+    pub opened_invite: RwSignal<Option<OpenedInvite>>,
     /// Last conversation opened in each workspace.
     pub last: StoredValue<HashMap<Uuid, Uuid>>,
     /// Conversations opened this session, newest first.
@@ -173,6 +175,7 @@ impl Ctx {
             now: RwSignal::new(js_sys::Date::now()),
             notice: RwSignal::new(None),
             invite_link: RwSignal::new(None),
+            opened_invite: RwSignal::new(None),
             last: StoredValue::new(HashMap::new()),
             recent: StoredValue::new(vec![]),
             staged: RwSignal::new(HashMap::new()),
@@ -398,4 +401,67 @@ impl Ctx {
 
 pub fn is_dm(kind: ConversationKind) -> bool {
     matches!(kind, ConversationKind::Dm | ConversationKind::GroupDm)
+}
+
+/// Where an opened invite link goes: this device's accounts on its server decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InviteRoute {
+    /// No account there: a new server, so the sign-up form.
+    Register,
+    /// One account there: the join panel for it.
+    Join(Uuid),
+    /// Several: the join panel, which asks which one.
+    Pick(Vec<Uuid>),
+}
+
+pub fn invite_route(accounts: &[Uuid]) -> InviteRoute {
+    match accounts {
+        [] => InviteRoute::Register,
+        [one] => InviteRoute::Join(*one),
+        many => InviteRoute::Pick(many.to_vec()),
+    }
+}
+
+impl Ctx {
+    /// Shows the screen for an invite the app was opened with. It only fills in a form: no
+    /// request is made, and the place in the app doesn't change.
+    pub fn show_opened_invite(&self, invite: OpenedInvite) {
+        let route = invite_route(&invite.accounts);
+        self.opened_invite.set(Some(invite));
+        match route {
+            InviteRoute::Register => {
+                self.overlay.set(Overlay::None);
+                self.adding.set(true);
+            }
+            InviteRoute::Join(_) | InviteRoute::Pick(_) => {
+                self.adding.set(false);
+                self.overlay.set(Overlay::JoinInvite);
+            }
+        }
+    }
+
+    /// Takes the link the app was opened with, if any, and shows its screen.
+    pub fn take_opened_invite(self) {
+        leptos::task::spawn_local(async move {
+            match ipc::invoke::<Option<OpenedInvite>>("take_invite_link", json!({})).await {
+                Ok(Some(invite)) => self.show_opened_invite(invite),
+                Ok(None) => {}
+                Err(e) => self.notice.set(Some(e)),
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod invite_tests {
+    use super::{InviteRoute, invite_route};
+    use uuid::Uuid;
+
+    #[test]
+    fn an_opened_invite_goes_to_sign_up_join_or_a_choice() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        assert_eq!(invite_route(&[]), InviteRoute::Register);
+        assert_eq!(invite_route(&[a]), InviteRoute::Join(a));
+        assert_eq!(invite_route(&[a, b]), InviteRoute::Pick(vec![a, b]));
+    }
 }

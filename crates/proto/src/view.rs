@@ -211,6 +211,8 @@ pub enum AppEvent {
         x: f64,
         y: f64,
     },
+    /// A `commons://` link reached the app; the UI takes it with `take_invite_link`.
+    InviteLinkOpened,
 }
 
 /// An invite link the app was opened with, checked and previewed. It only fills in a form.

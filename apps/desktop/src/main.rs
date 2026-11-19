@@ -25,6 +25,8 @@ pub struct Host {
     pub spike: Option<spike::Spike>,
     /// Paths of files dropped on the window, until the UI says which composer takes them.
     pub drops: Mutex<Drops>,
+    /// The latest `commons://` link, until the UI takes it. Never logged: it holds a token.
+    pub opened_link: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -54,6 +56,26 @@ impl Host {
 
     pub fn take_drop(&self, id: u64) -> Option<Vec<PathBuf>> {
         self.drops.lock().ok()?.paths.remove(&id)
+    }
+}
+
+/// A `commons://` link, while running or the one that launched the app. It is kept for the
+/// UI to take and check; nothing else happens until the person acts on the screen it opens.
+fn on_link(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
+    let Some(url) = urls.into_iter().rfind(|u| u.scheme() == "commons") else {
+        return;
+    };
+    let Some(host) = app.try_state::<Host>() else {
+        return;
+    };
+    tracing::info!("commons:// link received");
+    if let Ok(mut slot) = host.opened_link.lock() {
+        *slot = Some(url.into());
+    }
+    host.broadcast(AppEvent::InviteLinkOpened);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
     }
 }
 
@@ -169,6 +191,7 @@ fn main() {
     install_crypto_provider();
     let spike_mode = std::env::var("COMMONS_SPIKE").is_ok_and(|v| v == "1");
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -234,7 +257,17 @@ fn main() {
                 app_channels: channels,
                 spike,
                 drops: Mutex::default(),
+                opened_link: Mutex::default(),
             });
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link()
+                    .on_open_url(move |event| on_link(&handle, event.urls()));
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    on_link(app.handle(), urls);
+                }
+            }
             updater::start(app.handle(), !spike_mode)?;
             Ok(())
         })

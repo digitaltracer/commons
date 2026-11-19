@@ -66,6 +66,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         reconnect_now,
         sign_in_again,
         server_meta,
+        take_invite_link,
         oidc_sign_in,
         oidc_sign_in_again,
         oidc_link,
@@ -845,6 +846,21 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
 #[tauri::command]
 async fn server_meta(host: State<'_, Host>, server_url: String) -> R<proto::api::Meta> {
     host.core.server_meta(&server_url).await.map_err(refused)
+}
+
+/// The `commons://` link the app was last opened with, checked and previewed; None when
+/// there is none. Taking it clears it.
+#[tauri::command]
+async fn take_invite_link(host: State<'_, Host>) -> R<Option<proto::view::OpenedInvite>> {
+    let raw = host.opened_link.lock().map_err(err)?.take();
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    host.core
+        .open_invite_link(&raw)
+        .await
+        .map(Some)
+        .map_err(err)
 }
 
 /// Signs in or creates an account through the server's provider, in the system browser.

@@ -880,14 +880,70 @@ pub(crate) fn looks_like_email(s: &str) -> bool {
 }
 
 /// Joins another workspace with a pasted invite link, as the account on that link's server.
+/// What an opened invite offers, under its server's host. `new_server` adds the warning for
+/// a server this app has no account on.
+#[component]
+pub fn InviteSummary(invite: proto::view::OpenedInvite, new_server: bool) -> impl IntoView {
+    let p = invite.preview;
+    let host = invite.host;
+    let notice_host = host.clone();
+    view! {
+        <div class="invsum">
+            <p class="invhost">"Join "<b>{host}</b></p>
+            <p>{p.inviter_name}" invited "<b>{p.email_masked}</b>" to "<b>{p.workspace_name}</b>
+                {format!(" as a {}.", p.role.as_str())}</p>
+            <p class="muted">{format!("The invite expires {}.", crate::settings::date(p.expires_at_ms))}</p>
+        </div>
+        {new_server.then(|| view! {
+            <div class="newserver" role="note">
+                <b>"New server. "</b>
+                {format!("This app has no account on {notice_host}. Continue only if you expected an invite to it.")}
+            </div>
+        })}
+    }
+}
+
+/// Joins a workspace with an invite link, as an account on its server. Opened from a
+/// `commons://` link it comes filled in, and asks which account when there are several.
 #[component]
 pub fn JoinInvite() -> impl IntoView {
     let c = ctx();
     let pasted = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
+    let opened = c.opened_invite;
+    let chosen = RwSignal::new(None::<Uuid>);
+    Effect::new(move |_| {
+        chosen.set(opened.with(|o| o.as_ref().and_then(|o| o.accounts.first().copied())));
+        error.set(None);
+    });
+    let close = move || {
+        opened.set(None);
+        c.overlay.set(Overlay::None);
+    };
+    let join = move |account_id: Uuid, token: String| {
+        busy.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            let args = json!({"accountId": account_id, "token": token});
+            match ipc::invoke::<proto::model::Workspace>("accept_invite", args).await {
+                Ok(w) => {
+                    close();
+                    c.go_to_workspace(account_id, Some(w.id));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            busy.set(false);
+        });
+    };
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        if let Some(o) = opened.get_untracked() {
+            if let Some(account_id) = chosen.get_untracked() {
+                join(account_id, o.token);
+            }
+            return;
+        }
         let link = pasted.get_untracked();
         let (server, token) = proto::api::split_invite(&link);
         let accounts = c.sidebar.get_untracked().accounts;
@@ -912,30 +968,53 @@ pub fn JoinInvite() -> impl IntoView {
             c.adding.set(true);
             return;
         };
-        busy.set(true);
-        error.set(None);
-        leptos::task::spawn_local(async move {
-            let args = json!({"accountId": account_id, "token": token});
-            match ipc::invoke::<proto::model::Workspace>("accept_invite", args).await {
-                Ok(w) => {
-                    c.overlay.set(Overlay::None);
-                    c.go_to_workspace(account_id, Some(w.id));
-                }
-                Err(e) => error.set(Some(e)),
-            }
-            busy.set(false);
-        });
+        join(account_id, token);
     };
+    let email_of = move |id: Uuid| c.account(id).map(|a| a.email).unwrap_or_default();
     view! {
         <Dialog label="Join with an invite link">
             <form on:submit=submit>
                 <div class="dbody">
-                    <label class="flabel">"Invite link"
-                        <input class="field" required autofocus placeholder="https://…/invite#…"
-                            prop:value=move || pasted.get() on:input=move |ev| pasted.set(event_target_value(&ev)) /></label>
+                    {move || match opened.get() {
+                        Some(o) => {
+                            let accounts = o.accounts.clone();
+                            let several = accounts.len() > 1;
+                            view! {
+                                <InviteSummary invite=o new_server=false />
+                                {several.then(|| view! {
+                                    <fieldset class="pick">
+                                        <legend>"Join as"</legend>
+                                        {accounts.into_iter().map(|id| view! {
+                                            <label class="chk"><input type="radio" name="joinas"
+                                                prop:checked=move || chosen.get() == Some(id)
+                                                on:change=move |_| chosen.set(Some(id)) />{email_of(id)}</label>
+                                        }).collect_view()}
+                                    </fieldset>
+                                })}
+                                {(!several).then(|| view! {
+                                    <p class="muted">{move || chosen.get().map(|id| format!("Joining as {}", email_of(id)))}</p>
+                                })}
+                            }.into_any()
+                        }
+                        None => view! {
+                            <label class="flabel">"Invite link"
+                                <input class="field" required autofocus placeholder="https://…/invite#…"
+                                    prop:value=move || pasted.get() on:input=move |ev| pasted.set(event_target_value(&ev)) /></label>
+                        }.into_any(),
+                    }}
                     {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
                 </div>
-                <footer class="dfoot"><button type="submit" class="btn primary" disabled=move || busy.get()>"Join"</button></footer>
+                <footer class="dfoot">
+                    <Show when=move || opened.with(|o| o.is_some())>
+                        <button type="button" class="btn" on:click=move |_| close()>"Not now"</button>
+                        // The invite may be for an address none of these accounts has.
+                        <button type="button" class="btn" on:click=move |_| {
+                            c.overlay.set(Overlay::None);
+                            c.adding.set(true);
+                        }>"Use another account"</button>
+                    </Show>
+                    <button type="submit" class="btn primary" disabled=move || busy.get()>"Join"</button>
+                </footer>
             </form>
         </Dialog>
     }
