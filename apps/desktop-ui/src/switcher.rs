@@ -4,7 +4,7 @@ use proto::view::{AccountView, ConnectionState, SessionEnd};
 use serde_json::json;
 
 use crate::ipc;
-use crate::panels::remove_account;
+use crate::panels::ConfirmRemove;
 use crate::state::{Overlay, ctx};
 use crate::ui::{self, Icon, icon, sized};
 
@@ -22,6 +22,7 @@ pub fn Switcher() -> impl IntoView {
     let c = ctx();
     let find = RwSignal::new(String::new());
     let manage = RwSignal::new(false);
+    let removing = RwSignal::new(None::<uuid::Uuid>);
     let new_ws = RwSignal::new(None::<uuid::Uuid>);
     let ws_name = RwSignal::new(String::new());
     let close = move || c.overlay.set(Overlay::None);
@@ -29,7 +30,6 @@ pub fn Switcher() -> impl IntoView {
 
     let account = move |a: AccountView| {
         let account_id = a.id;
-        let server_host = StoredValue::new(ui::host(&a.server_url));
         let (status, dot) = status_label(&a);
         let signed_out = a.connection == ConnectionState::SignedOut;
         let ended = match a.session_end {
@@ -104,12 +104,19 @@ pub fn Switcher() -> impl IntoView {
                         <span class="ws sm ghost">{sized(Icon::Plus, 14)}</span><span class="wn">"New workspace"</span></button> }.into_any()
                 } else { ().into_any() }}
                 <Show when=move || manage.get()>
-                    <div class="manage">
-                        <button class="btn danger" on:click=move |_| {
-                            close();
-                            remove_account(account_id, server_host.get_value());
-                        }>"Sign out and remove from this Mac"</button>
-                    </div>
+                    {move || if removing.get() == Some(account_id) {
+                        view! {
+                            <ConfirmRemove account_id=account_id class="manage removing"
+                                on_cancel=Callback::new(move |_| removing.set(None)) />
+                        }.into_any()
+                    } else {
+                        view! {
+                            <div class="manage">
+                                <button class="btn danger" on:click=move |_| removing.set(Some(account_id))>
+                                    "Sign out and remove from this Mac…"</button>
+                            </div>
+                        }.into_any()
+                    }}
                 </Show>
             </div>
         }

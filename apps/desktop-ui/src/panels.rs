@@ -667,6 +667,51 @@ pub fn remove_account(account_id: Uuid, host: String) {
     });
 }
 
+/// What removing an account deletes from this Mac, counting the messages that would be lost.
+fn removal_warning(pending: u32, host: &str) -> String {
+    match pending {
+        0 => {
+            format!("This deletes its saved messages here. Your account on {host} isn't affected.")
+        }
+        n => format!(
+            "This deletes its saved messages here, and {} that {} been sent. Your account on {host} isn't affected.",
+            messages(n),
+            if n == 1 { "hasn't" } else { "haven't" }
+        ),
+    }
+}
+
+/// Asks before removing an account from this Mac, with Cancel focused.
+#[component]
+pub fn ConfirmRemove(
+    account_id: Uuid,
+    class: &'static str,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
+    let c = ctx();
+    let cancel = NodeRef::<leptos::html::Button>::new();
+    focus_when_mounted(cancel);
+    let host = c
+        .account(account_id)
+        .map(|a| ui::host(&a.server_url))
+        .unwrap_or_default();
+    let warning = move || {
+        let pending = c.account(account_id).map(|a| waiting(&a)).unwrap_or(0);
+        removal_warning(pending, &host)
+    };
+    view! {
+        <footer class=class role="group" aria-label="Remove from this Mac?">
+            <span class="muted">{warning}</span>
+            <button type="button" class="btn" node_ref=cancel on:click=move |_| on_cancel.run(())>"Cancel"</button>
+            <button type="button" class="btn danger" on:click=move |_| {
+                c.overlay.set(Overlay::None);
+                let host = c.account(account_id).map(|a| ui::host(&a.server_url)).unwrap_or_default();
+                remove_account(account_id, host);
+            }>"Remove"</button>
+        </footer>
+    }
+}
+
 /// Sends the password; on failure, the error is worded for the person signing in.
 fn sign_in(
     account_id: Uuid,
@@ -829,9 +874,7 @@ pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
     let busy = RwSignal::new(false);
     let confirm = RwSignal::new(false);
     let password_field = NodeRef::<leptos::html::Input>::new();
-    let cancel = NodeRef::<leptos::html::Button>::new();
     focus_when_mounted(password_field);
-    focus_when_mounted(cancel);
     let a = c.account(account_id);
     let s = a.as_ref().and_then(signed_out);
     let pending = a.as_ref().map(waiting).unwrap_or(0);
@@ -846,17 +889,6 @@ pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
         n => format!(
             "Saved messages, drafts and {} waiting to send stay on this Mac.",
             messages(n)
-        ),
-    };
-    let gone = host.clone();
-    let removing = match pending {
-        0 => {
-            format!("This deletes its saved messages here. Your account on {host} isn't affected.")
-        }
-        n => format!(
-            "This deletes its saved messages here, and {} that {} been sent. Your account on {host} isn't affected.",
-            messages(n),
-            if n == 1 { "hasn't" } else { "haven't" }
         ),
     };
     let submit = move |ev: leptos::ev::SubmitEvent| {
@@ -894,16 +926,9 @@ pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
                     <div class="kept">{sized(Icon::Check, 14)}<span>{kept}</span></div>
                 </div>
                 {move || if confirm.get() {
-                    let gone = gone.clone();
                     view! {
-                        <footer class="dfoot" role="group" aria-label="Remove from this Mac?">
-                            <span class="muted">{removing.clone()}</span>
-                            <button type="button" class="btn" node_ref=cancel on:click=move |_| confirm.set(false)>"Cancel"</button>
-                            <button type="button" class="btn danger" on:click=move |_| {
-                                c.overlay.set(Overlay::None);
-                                remove_account(account_id, gone.clone());
-                            }>"Remove"</button>
-                        </footer>
+                        <ConfirmRemove account_id=account_id class="dfoot"
+                            on_cancel=Callback::new(move |_| confirm.set(false)) />
                     }.into_any()
                 } else {
                     view! {
