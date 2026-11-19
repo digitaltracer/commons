@@ -15,6 +15,7 @@ use client_core::transport::{HttpTransport, Transport};
 use proto::view::AppEvent;
 use tauri::Manager;
 use tauri::ipc::Channel;
+use tauri_plugin_window_state::StateFlags;
 
 pub struct Host {
     pub core: Arc<Core>,
@@ -61,6 +62,36 @@ fn secret_store(data_dir: &std::path::Path) -> anyhow::Result<Arc<dyn SecretStor
     })
 }
 
+/// What the window keeps between launches: size, position and maximized/fullscreen. Not
+/// decorations or visibility, which would fight the overlay title bar or reopen it hidden.
+const WINDOW_STATE: StateFlags = StateFlags::SIZE
+    .union(StateFlags::POSITION)
+    .union(StateFlags::MAXIMIZED)
+    .union(StateFlags::FULLSCREEN);
+
+/// macOS applies a window's minimum size only to drags. A frame restored from an old or
+/// edited state file, or set from code, is raised back to the configured minimum.
+fn keep_minimum(window: &tauri::Window, size: tauri::PhysicalSize<u32>) {
+    let app = window.app_handle();
+    let Some(cfg) = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|c| c.label == window.label())
+    else {
+        return;
+    };
+    let (min_w, min_h) = (cfg.min_width.unwrap_or(0.0), cfg.min_height.unwrap_or(0.0));
+    let size = size.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
+    if size.width < min_w || size.height < min_h {
+        let _ = window.set_size(tauri::LogicalSize::new(
+            size.width.max(min_w),
+            size.height.max(min_h),
+        ));
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -71,6 +102,16 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(WINDOW_STATE)
+                .build(),
+        )
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Resized(size) = event {
+                keep_minimum(window, *size);
+            }
+        })
         .register_asynchronous_uri_scheme_protocol(files::SCHEME, |ctx, request, responder| {
             let Some(host) = ctx.app_handle().try_state::<Host>() else {
                 responder.respond(files::status(503));
