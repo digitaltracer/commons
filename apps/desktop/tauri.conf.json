@@ -55,7 +55,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "PENDING",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwMTg0QkQ5MzM0N0E4RjgKUldUNHFFY3oyVXNZc0haREhOTDliaEFnSHUrdk5qZU1pcng3bEtYZmVmaFM2czdwaVNJN1dRTFcK",
       "endpoints": [
         "https://github.com/digitaltracer/commons/releases/latest/download/latest.json"
       ],
