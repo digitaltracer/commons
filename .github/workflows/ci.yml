@@ -43,3 +43,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The universal Mac bundle, unsigned: catches release-only and bundling breakage. No secrets.
+  mac-bundle:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked tauri-cli --version "^2.12"
+      - run: cargo install --locked trunk
+      - run: cargo tauri build --target universal-apple-darwin --bundles app --no-sign
+        working-directory: apps/desktop
