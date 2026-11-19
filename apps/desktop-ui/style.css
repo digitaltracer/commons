@@ -10,7 +10,7 @@
   --chip: #E9ECEA; --online: #1E8E5A; --thumb: #F3F5F4; --off: #8A918D;
   --mark: #FBE3A6; --marktext: #3D2800; --info: #E8F0F7; --infotext: #24496B;
   --scrim: rgba(20,24,22,.22); --pop: #FFFFFF; --alert: #B26A00; --danger: #B3261E; --dangersoft: #FBE9E7;
-  --new: #B83A12;
+  --new: #B83A12; --hlmark: #949B97; --hlem: #3D5C8A;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -24,7 +24,7 @@
     --chip: #2C302E; --online: #3CC77E; --thumb: #2A2E2C; --off: #7D8580;
     --mark: #5A4614; --marktext: #FFE7A8; --info: #1C2A36; --infotext: #A9CBEA;
     --scrim: rgba(0,0,0,.4); --pop: #262928; --alert: #D08A1E; --danger: #FF8A80; --dangersoft: #3A1F1C;
-    --new: #F08A5D;
+    --new: #F08A5D; --hlmark: #737B77; --hlem: #A3BCE4;
     color-scheme: dark;
   }
 }
@@ -278,8 +278,23 @@ a { color: var(--accent); }
 @container (max-width: 470px) { .cgroup2 { display: none; } }
 @container (max-width: 380px) { .cgroup { display: none; } .cgroup + .vsep { display: none; } }
 .cwrap { position: relative; }
-.ctext { display: block; width: 100%; border: 0; background: transparent; outline: 0; resize: none; padding: 10px 12px 4px; font-size: 14px; line-height: 1.45; max-height: 200px; }
+/* The textarea and its highlight layer share every metric. Kerning and ligatures are off in
+   both, so a style boundary in the layer can't shift a glyph; the layer adds colour only. */
+.ctext, .hlayer { padding: 10px 12px 4px; font-size: 14px; line-height: 1.45; font-kerning: none; font-variant-ligatures: none; white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; letter-spacing: normal; }
+.ctext { display: block; position: relative; z-index: 1; width: 100%; margin: 0; border: 0; background: transparent; outline: 0; resize: none; max-height: 200px; }
 .ctext::placeholder { color: var(--text3); }
+.ctext.over { color: transparent; caret-color: var(--text); }
+.ctext.over::selection { color: transparent; background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.hlayer { position: absolute; left: 0; top: 0; z-index: 0; margin: 0; overflow: hidden; pointer-events: none; color: var(--text); }
+.hcbox { position: absolute; left: 0; right: 0; top: 0; z-index: -1; }
+.hcbg { position: absolute; left: 6px; right: 6px; background: var(--code); border: 1px solid var(--line); border-radius: 6px; }
+.hs { color: var(--accenttext); }
+.he { color: var(--hlem); }
+.hx { color: var(--text3); }
+.hk { color: var(--accent); }
+.hc { background: var(--code); border-radius: 3px; }
+.hu, .hh { background: var(--accentsoft); color: var(--accenttext); border-radius: 4px; }
+.hm { color: var(--hlmark); }
 .cfoot { display: flex; align-items: center; gap: 2px; padding: 2px 6px 6px; }
 .hint { font-size: 11.5px; color: var(--text3); margin-left: auto; margin-right: 10px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hint + .hint { margin-left: 0; }

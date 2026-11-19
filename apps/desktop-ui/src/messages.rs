@@ -11,6 +11,7 @@ use wasm_bindgen::JsCast;
 use crate::compose;
 use crate::emoji::EmojiPicker;
 use crate::ipc;
+use crate::layer;
 use crate::markdown::{self, Reader, mentions_me};
 use crate::spike;
 use crate::state::{Aside, ctx};
@@ -1043,6 +1044,19 @@ fn splice(
     let mut t = text.get_untracked();
     let to = to.min(t.len());
     let from = from.min(to);
+    if let Some(el) = textarea(r) {
+        let _ = el.focus();
+        let _ = el.set_selection_range(ui::byte_to_utf16(&t, from), ui::byte_to_utf16(&t, to));
+        if layer::insert_text(insert) {
+            // The field's input event has updated `text`.
+            if caret_back > 0 {
+                let after = text.get_untracked();
+                let pos = ui::byte_to_utf16(&after, from + insert.len() - caret_back);
+                let _ = el.set_selection_range(pos, pos);
+            }
+            return;
+        }
+    }
     t.replace_range(from..to, insert);
     let caret = from + insert.len() - caret_back;
     let pos = ui::byte_to_utf16(&t, caret);
@@ -1185,6 +1199,8 @@ pub fn Composer(
     let draft_ready = RwSignal::new(false);
     let picked = StoredValue::new(Vec::<(Uuid, String)>::new());
     let area: NodeRef<Textarea> = NodeRef::new();
+    let hl: NodeRef<Div> = NodeRef::new();
+    let boxes: NodeRef<Div> = NodeRef::new();
     let last_typing = StoredValue::new(0f64);
     let members = RwSignal::new(Vec::<Member>::new());
     let ac = RwSignal::new(None::<(usize, String)>);
@@ -1202,6 +1218,29 @@ pub fn Composer(
         text,
         draft_ready,
     );
+    // The field's value is written only when it differs, so typing and IME composition are
+    // never interrupted and the field keeps its undo stack.
+    Effect::new(move |_| {
+        let t = text.get();
+        if let Some(el) = area.get()
+            && el.value() != t
+        {
+            el.set_value(&t);
+        }
+        queue_microtask(move || {
+            layer::sync(area, hl);
+            layer::shade(hl, boxes);
+        });
+    });
+    Effect::new(move |_| {
+        if let Some(el) = area.get() {
+            let ro = ipc::on_resize(&[&el], move || {
+                layer::sync(area, hl);
+                layer::shade(hl, boxes);
+            });
+            on_cleanup(move || ro.disconnect());
+        }
+    });
     let refresh_fence = move || {
         let t = text.get_untracked();
         let (caret, _) = selection(&t, area);
@@ -1363,15 +1402,19 @@ pub fn Composer(
     view! {
         <div class="comp">
             <div class="cwrap">
+                <div class="hlayer" aria-hidden="true" node_ref=hl>
+                    <div class="hcbox" node_ref=boxes></div>
+                    {move || text.with(|t| picked.with_value(|p| layer::content(t, &picked_entities(t, p))))}
+                </div>
                 <label class="visually-hidden" for=id.clone()>{label.clone()}</label>
-                <textarea id=id class="ctext" node_ref=area rows=rows
+                <textarea id=id class="ctext over" node_ref=area rows=rows
                     placeholder=move || match c.connection(account_id) {
                         ConnectionState::Online => placeholder2.clone(),
                         ConnectionState::SignedOut => format!("{placeholder2}. Sends after you sign in"),
                         _ => format!("{placeholder2}. Sends when you're back online"),
                     }
                     aria-autocomplete="list" aria-expanded=move || (!suggestions().is_empty()).to_string()
-                    prop:value=move || text.get()
+                    on:scroll=move |_| layer::sync(area, hl)
                     on:input=move |ev| {
                         text.set(event_target_value(&ev));
                         refresh();

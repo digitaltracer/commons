@@ -6,6 +6,7 @@ mod compose;
 mod emoji;
 mod ipc;
 mod jump;
+mod layer;
 mod layout;
 mod markdown;
 mod messages;
