@@ -39,6 +39,12 @@ pub struct MessageView {
     pub state: SendState,
     pub reactions: Vec<Reaction>,
     pub reply_count: u32,
+    /// When the newest reply in this message's thread was sent.
+    #[serde(default)]
+    pub last_reply_at_ms: Option<i64>,
+    /// The latest distinct repliers, newest first, at most three.
+    #[serde(default)]
+    pub reply_user_ids: Vec<Uuid>,
     pub attachments: Vec<AttachmentView>,
     pub mine: bool,
 }

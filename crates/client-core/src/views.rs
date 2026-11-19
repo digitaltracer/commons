@@ -9,7 +9,7 @@ use proto::view::{
 };
 use uuid::Uuid;
 
-use crate::store::{OutboxItem, OutboxKind, OutboxState, Storage, WindowItem};
+use crate::store::{OutboxItem, OutboxKind, OutboxState, ReplySummary, Storage, WindowItem};
 
 /// URL the webview loads; served by the shell's `commons-file` protocol through the core.
 pub fn file_url(account_id: Uuid, file_id: Uuid, thumbnail: bool) -> String {
@@ -41,7 +41,7 @@ pub fn message_view(
     me: Uuid,
     m: &Message,
     names: &Names,
-    replies: u32,
+    replies: Option<&ReplySummary>,
 ) -> MessageView {
     MessageView {
         id: m.client_id,
@@ -55,7 +55,9 @@ pub fn message_view(
         revision: m.revision,
         state: SendState::Sent,
         reactions: m.reactions.clone(),
-        reply_count: replies,
+        reply_count: replies.map_or(0, |r| r.count),
+        last_reply_at_ms: replies.map(|r| r.last_at_ms),
+        reply_user_ids: replies.map(|r| r.authors.clone()).unwrap_or_default(),
         attachments: m
             .attachments
             .iter()
@@ -87,6 +89,8 @@ pub fn pending_view(me: Uuid, o: &OutboxItem, names: &Names) -> Option<MessageVi
         },
         reactions: vec![],
         reply_count: 0,
+        last_reply_at_ms: None,
+        reply_user_ids: vec![],
         attachments: vec![],
         mine: true,
     })
@@ -106,17 +110,13 @@ pub fn window_views(
             _ => None,
         })
         .collect();
-    let replies = store.reply_counts(&roots)?;
+    let replies = store.reply_summaries(&roots)?;
     Ok(items
         .iter()
         .filter_map(|i| match i {
-            WindowItem::Message(m) => Some(message_view(
-                account_id,
-                me,
-                m,
-                names,
-                replies.get(&m.id).copied().unwrap_or(0),
-            )),
+            WindowItem::Message(m) => {
+                Some(message_view(account_id, me, m, names, replies.get(&m.id)))
+            }
             WindowItem::Pending(o) => pending_view(me, o, names),
         })
         .collect())

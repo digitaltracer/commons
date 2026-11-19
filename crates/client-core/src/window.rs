@@ -278,6 +278,8 @@ mod tests {
             state: SendState::Sent,
             reactions: vec![],
             reply_count: 0,
+            last_reply_at_ms: None,
+            reply_user_ids: vec![],
             attachments: vec![],
             mine: false,
         }

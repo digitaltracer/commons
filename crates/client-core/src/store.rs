@@ -163,7 +163,8 @@ pub trait Storage: Send + Sync {
         offset_from_end: u32,
         limit: u32,
     ) -> anyhow::Result<(u32, Vec<WindowItem>)>;
-    fn reply_counts(&self, roots: &[Uuid]) -> anyhow::Result<HashMap<Uuid, u32>>;
+    /// Live replies under each thread root that has any.
+    fn reply_summaries(&self, roots: &[Uuid]) -> anyhow::Result<HashMap<Uuid, ReplySummary>>;
     fn backfills(&self) -> anyhow::Result<Vec<Backfill>>;
     fn outbox(&self) -> anyhow::Result<Vec<OutboxItem>>;
     fn drafts(&self) -> anyhow::Result<Vec<DraftView>>;
@@ -171,6 +172,14 @@ pub trait Storage: Send + Sync {
     /// (unread, mentions) for top-level messages by others after the read cursor.
     fn unread(&self, conversation_id: Uuid, me: Uuid) -> anyhow::Result<(u32, u32)>;
     fn latest_seq(&self, conversation_id: Uuid) -> anyhow::Result<i64>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplySummary {
+    pub count: u32,
+    pub last_at_ms: i64,
+    /// Distinct repliers, newest first, at most three.
+    pub authors: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -747,15 +756,30 @@ impl Storage for SqliteStore {
         Ok((total, items))
     }
 
-    fn reply_counts(&self, roots: &[Uuid]) -> anyhow::Result<HashMap<Uuid, u32>> {
+    fn reply_summaries(&self, roots: &[Uuid]) -> anyhow::Result<HashMap<Uuid, ReplySummary>> {
         let conn = self.lock();
-        let mut st = conn
-            .prepare("SELECT count(*) FROM messages WHERE thread_root_id = ?1 AND deleted = 0")?;
+        let mut st = conn.prepare(
+            "SELECT author_id, json_extract(json, '$.created_at_ms') FROM messages
+             WHERE thread_root_id = ?1 AND deleted = 0 ORDER BY created_seq DESC",
+        )?;
         let mut out = HashMap::new();
         for r in roots {
-            let n: u32 = st.query_row([r.to_string()], |row| row.get(0))?;
-            if n > 0 {
-                out.insert(*r, n);
+            let mut sum = ReplySummary::default();
+            let rows = st.query_map([r.to_string()], |row| {
+                Ok((uuid(row.get(0)?)?, row.get::<_, Option<i64>>(1)?))
+            })?;
+            for row in rows {
+                let (author, at) = row?;
+                if sum.count == 0 {
+                    sum.last_at_ms = at.unwrap_or(0);
+                }
+                sum.count += 1;
+                if sum.authors.len() < 3 && !sum.authors.contains(&author) {
+                    sum.authors.push(author);
+                }
+            }
+            if sum.count > 0 {
+                out.insert(*r, sum);
             }
         }
         Ok(out)
@@ -842,4 +866,68 @@ impl Storage for SqliteStore {
 
 fn thread_root_id_of(root: &Option<String>) -> Option<Uuid> {
     root.as_ref().and_then(|r| r.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(id: u128, root: Uuid, author: u128, seq: i64, deleted: bool) -> Message {
+        Message {
+            id: Uuid::from_u128(id),
+            workspace_id: Uuid::nil(),
+            conversation_id: Uuid::nil(),
+            author_id: Uuid::from_u128(author),
+            client_id: Uuid::from_u128(1000 + id),
+            thread_root_id: Some(root),
+            body: "r".into(),
+            entities: vec![],
+            content_type: "text/markdown".into(),
+            encryption: None,
+            attachments: vec![],
+            reactions: vec![],
+            revision: 1,
+            deleted,
+            created_seq: seq,
+            updated_seq: seq,
+            created_at_ms: seq * 1000,
+            edited_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn reply_summaries_name_the_latest_repliers() {
+        let store = SqliteStore::in_memory().unwrap();
+        let root = Uuid::from_u128(1);
+        let quiet = Uuid::from_u128(2);
+        store
+            .commit(vec![
+                Op::GrantAccess {
+                    conversation: Conversation {
+                        id: Uuid::nil(),
+                        workspace_id: Uuid::nil(),
+                        kind: ConversationKind::Public,
+                        name: Some("g".into()),
+                        dm_user_ids: vec![],
+                    },
+                    access_seq: 0,
+                },
+                Op::MergeMessage(reply(10, root, 7, 1, false)),
+                Op::MergeMessage(reply(11, root, 8, 2, false)),
+                Op::MergeMessage(reply(12, root, 7, 3, false)),
+                Op::MergeMessage(reply(13, root, 9, 4, false)),
+                Op::MergeMessage(reply(14, root, 6, 5, false)),
+                Op::MergeMessage(reply(15, root, 5, 6, true)),
+            ])
+            .unwrap();
+        let s = store.reply_summaries(&[root, quiet]).unwrap();
+        assert!(!s.contains_key(&quiet));
+        let r = &s[&root];
+        assert_eq!(r.count, 5);
+        assert_eq!(r.last_at_ms, 5000);
+        assert_eq!(
+            r.authors,
+            vec![Uuid::from_u128(6), Uuid::from_u128(9), Uuid::from_u128(7)]
+        );
+    }
 }
