@@ -188,3 +188,68 @@ pub enum AppEvent {
         version: String,
     },
 }
+
+/// Pane widths in CSS px: (smallest, default, largest).
+pub const SIDEBAR_WIDTH: (u32, u32, u32) = (208, 256, 420);
+pub const THREAD_WIDTH: (u32, u32, u32) = (320, 380, 560);
+
+/// Window layout the user chose, kept by the core on this device. `None` is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiPrefs {
+    #[serde(default)]
+    pub sidebar_width: Option<u32>,
+    #[serde(default)]
+    pub thread_width: Option<u32>,
+}
+
+fn within((min, default, max): (u32, u32, u32), v: Option<u32>) -> u32 {
+    v.map_or(default, |v| v.clamp(min, max))
+}
+
+impl UiPrefs {
+    pub fn sidebar(&self) -> u32 {
+        within(SIDEBAR_WIDTH, self.sidebar_width)
+    }
+
+    pub fn thread(&self) -> u32 {
+        within(THREAD_WIDTH, self.thread_width)
+    }
+
+    /// Widths inside their limits; a default width is stored as `None`.
+    pub fn clamped(self) -> UiPrefs {
+        let keep = |limits: (u32, u32, u32), v: Option<u32>| {
+            v.map(|_| within(limits, v)).filter(|w| *w != limits.1)
+        };
+        UiPrefs {
+            sidebar_width: keep(SIDEBAR_WIDTH, self.sidebar_width),
+            thread_width: keep(THREAD_WIDTH, self.thread_width),
+        }
+    }
+}
+
+#[cfg(test)]
+mod ui_prefs_tests {
+    use super::*;
+
+    #[test]
+    fn widths_stay_within_limits() {
+        let p = UiPrefs {
+            sidebar_width: Some(10),
+            thread_width: Some(9000),
+        };
+        assert_eq!((p.sidebar(), p.thread()), (208, 560));
+        assert_eq!(
+            p.clamped(),
+            UiPrefs {
+                sidebar_width: Some(208),
+                thread_width: Some(560)
+            }
+        );
+        let d = UiPrefs {
+            sidebar_width: Some(256),
+            thread_width: None,
+        };
+        assert_eq!(d.clamped(), UiPrefs::default());
+        assert_eq!((d.sidebar(), d.thread()), (256, 380));
+    }
+}

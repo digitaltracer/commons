@@ -56,6 +56,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         recent_emoji,
         composer_draft,
         save_composer_draft,
+        ui_prefs,
+        set_ui_prefs,
         reconnect_now,
         sign_in_again,
         server_meta,
@@ -568,6 +570,16 @@ fn save_composer_draft(
         .map_err(err)?
         .set_composer_draft(conversation_id, thread_root_id, &text)
         .map_err(err)
+}
+
+#[tauri::command]
+fn ui_prefs(host: State<'_, Host>) -> proto::view::UiPrefs {
+    host.core.ui_prefs()
+}
+
+#[tauri::command]
+fn set_ui_prefs(host: State<'_, Host>, prefs: proto::view::UiPrefs) -> R<proto::view::UiPrefs> {
+    host.core.set_ui_prefs(prefs).map_err(err)
 }
 
 #[tauri::command]

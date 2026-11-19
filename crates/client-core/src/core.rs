@@ -8,7 +8,7 @@ use std::time::Duration;
 use proto::api::{
     AcceptInvite, IdentityList, LoginRequest, Meta, OidcExchanged, RegisterRequest, SessionResponse,
 };
-use proto::view::{AppEvent, SidebarView};
+use proto::view::{AppEvent, SidebarView, UiPrefs};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -72,6 +72,27 @@ impl Core {
 
     fn saved_path(&self) -> PathBuf {
         self.data_dir.join("accounts.json")
+    }
+
+    fn ui_prefs_path(&self) -> PathBuf {
+        self.data_dir.join("ui_prefs.json")
+    }
+
+    /// Pane sizes and other layout choices; defaults when none are saved or the file is unreadable.
+    pub fn ui_prefs(&self) -> UiPrefs {
+        std::fs::read(self.ui_prefs_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<UiPrefs>(&b).ok())
+            .map(UiPrefs::clamped)
+            .unwrap_or_default()
+    }
+
+    pub fn set_ui_prefs(&self, prefs: UiPrefs) -> anyhow::Result<UiPrefs> {
+        let prefs = prefs.clamped();
+        let tmp = self.ui_prefs_path().with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&prefs)?)?;
+        std::fs::rename(tmp, self.ui_prefs_path())?;
+        Ok(prefs)
     }
 
     fn load_saved(&self) -> anyhow::Result<Vec<SavedAccount>> {
@@ -576,5 +597,45 @@ impl Core {
             .collect::<anyhow::Result<_>>()?;
         accounts.sort_by(|a, b| a.server_url.cmp(&b.server_url).then(a.email.cmp(&b.email)));
         Ok(SidebarView { accounts })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{MemorySecrets, RecordingNotifier};
+    use crate::transport::HttpTransport;
+
+    fn open(dir: &Path) -> Arc<Core> {
+        Core::open(
+            dir,
+            Arc::new(MemorySecrets::default()),
+            Arc::new(RecordingNotifier::default()),
+            Arc::new(|u: &str| Arc::new(HttpTransport::new(u)) as Arc<dyn Transport>),
+            Arc::new(|_| {}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ui_prefs_are_clamped_and_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("ui-prefs-{}", Uuid::now_v7()));
+        {
+            let core = open(&dir);
+            assert_eq!(core.ui_prefs(), UiPrefs::default());
+            let saved = core
+                .set_ui_prefs(UiPrefs {
+                    sidebar_width: Some(300),
+                    thread_width: Some(5000),
+                })
+                .unwrap();
+            assert_eq!(saved.thread_width, Some(560));
+        }
+        let core = open(&dir);
+        assert_eq!(core.ui_prefs().sidebar(), 300);
+        assert_eq!(core.ui_prefs().thread(), 560);
+        std::fs::write(dir.join("ui_prefs.json"), b"not json").unwrap();
+        assert_eq!(core.ui_prefs(), UiPrefs::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
