@@ -1629,14 +1629,21 @@ pub fn mentions(
 /// Picked mentions that point at an `@` in the body, plus parsed ones that don't overlap them.
 pub fn merge_mentions(body: &str, picked: Vec<Entity>, parsed: Vec<Entity>) -> Vec<Entity> {
     let span = |e: &Entity| match e {
-        Entity::Mention { start, end, .. } => Some((*start as usize, *end as usize)),
-        _ => None,
+        Entity::Mention { start, end, .. } | Entity::ChannelLink { start, end, .. } => {
+            Some((*start as usize, *end as usize))
+        }
+        Entity::Emoji { .. } => None,
+    };
+    // Picked mentions and channel links must cover an `@name` or a `#name`.
+    let sigil = |e: &Entity| match e {
+        Entity::ChannelLink { .. } => '#',
+        _ => '@',
     };
     let mut out: Vec<Entity> = picked
         .into_iter()
         .filter(|e| {
             span(e).is_some_and(|(s, end)| {
-                s < end && body.get(s..end).is_some_and(|t| t.starts_with('@'))
+                s < end && body.get(s..end).is_some_and(|t| t.starts_with(sigil(e)))
             })
         })
         .collect();

@@ -162,6 +162,55 @@ fn picked_mentions_must_point_at_an_at_sign() {
     assert_eq!(got, vec![m(u, 0, 4), m(v, 9, 12)]);
 }
 
+#[test]
+fn picked_channel_links_must_point_at_a_hash() {
+    let u = Uuid::from_u128(1);
+    let dev = Uuid::from_u128(9);
+    let link = |start, end| Entity::ChannelLink {
+        conversation_id: dev,
+        start,
+        end,
+    };
+    let ann = Entity::Mention {
+        user_id: u,
+        start: 0,
+        end: 4,
+    };
+    let got = merge_mentions(
+        "@Ann see #dev",
+        vec![link(9, 13), link(5, 8), link(0, 4)],
+        vec![ann.clone()],
+    );
+    assert_eq!(got, vec![ann, link(9, 13)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picked_channel_link_reaches_the_server() {
+    let srv = server::testing::spawn(|_| {}).await;
+    let alice = register(&srv, "alice").await;
+    let ws = workspace(&srv, &alice, &[]).await;
+    let a = account_with_store(&srv, &alice, memory());
+    a.sync_once().await.unwrap();
+    let general = general(&a, ws.id);
+    let link = Entity::ChannelLink {
+        conversation_id: general,
+        start: 4,
+        end: 12,
+    };
+    a.send_message_with(
+        general,
+        "see #general".into(),
+        None,
+        vec![],
+        vec![link.clone()],
+    )
+    .unwrap();
+    a.process_outbox().await.unwrap();
+    a.sync_once().await.unwrap();
+    let m = a.store.messages(general).unwrap().remove(0);
+    assert_eq!(m.entities, vec![link]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn recent_emoji_and_queued_sends_while_offline() {
     let srv = server::testing::spawn(|_| {}).await;

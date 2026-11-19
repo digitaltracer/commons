@@ -2,6 +2,8 @@
 use std::ops::Range;
 
 use proto::markdown::Style;
+use proto::model::Entity;
+use uuid::Uuid;
 
 /// Whether the caret, after `before`, sits inside a ``` or ~~~ fence that isn't closed yet.
 pub fn in_open_fence(before: &str) -> bool {
@@ -113,6 +115,88 @@ pub fn emoji_query(text: &str, caret: usize) -> Option<(usize, String)> {
         && q.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_+-".contains(c));
     ok.then(|| (at, q.to_ascii_lowercase()))
+}
+
+/// A `#name` being typed: where the `#` is and the name so far. `# ` starts a heading instead.
+pub fn channel_query(text: &str, caret: usize) -> Option<(usize, String)> {
+    let (at, q) = sigil_query(text, caret, '#')?;
+    let ok = q.len() <= 80 && q.chars().all(|c| c.is_alphanumeric() || "-_.".contains(c));
+    ok.then(|| (at, q.to_lowercase()))
+}
+
+/// Channels for `q`: name prefix first, then a word of the name, then anywhere.
+pub fn channel_matches<'a>(
+    channels: &'a [(Uuid, String)],
+    q: &str,
+    limit: usize,
+) -> Vec<&'a (Uuid, String)> {
+    let q = q.to_lowercase();
+    let rank = |name: &str| {
+        let n = name.to_lowercase();
+        if n.starts_with(&q) {
+            Some(0)
+        } else if n.split(['-', '_', '.', ' ']).any(|w| w.starts_with(&q)) {
+            Some(1)
+        } else if n.contains(&q) {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    let mut hits: Vec<(u8, &(Uuid, String))> = channels
+        .iter()
+        .filter_map(|c| rank(&c.1).map(|r| (r, c)))
+        .collect();
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.1.cmp(&b.1.1)));
+    hits.into_iter().take(limit).map(|(_, c)| c).collect()
+}
+
+/// What an autocomplete pick inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    User(Uuid),
+    Channel(Uuid),
+}
+
+/// Entities for the picks whose text (`@Name`, `#name`) is still in the body, each matched to
+/// a separate, whole occurrence.
+pub fn picked_entities(body: &str, picked: &[(Pick, String)]) -> Vec<Entity> {
+    let mut taken: Vec<(usize, usize)> = vec![];
+    let mut out = vec![];
+    for (pick, needle) in picked {
+        let hit = body
+            .match_indices(needle.as_str())
+            .map(|(s, _)| (s, s + needle.len()))
+            .find(|(s, e)| {
+                body[*e..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && !"-_".contains(c))
+                    && taken.iter().all(|(ts, te)| e <= ts || s >= te)
+            });
+        if let Some((s, e)) = hit {
+            taken.push((s, e));
+            let (start, end) = (s as u32, e as u32);
+            out.push(match *pick {
+                Pick::User(user_id) => Entity::Mention {
+                    user_id,
+                    start,
+                    end,
+                },
+                Pick::Channel(conversation_id) => Entity::ChannelLink {
+                    conversation_id,
+                    start,
+                    end,
+                },
+            });
+        }
+    }
+    out.sort_by_key(|e| match e {
+        Entity::Mention { start, .. }
+        | Entity::ChannelLink { start, .. }
+        | Entity::Emoji { start, .. } => *start,
+    });
+    out
 }
 
 /// One stretch of the highlight layer: a byte range and the styles on it, as bits.
@@ -259,6 +343,58 @@ mod tests {
         assert_eq!(emoji_query("`x :ta", 6), None);
         assert_eq!(emoji_query("```\n:ta", 7), None);
         assert_eq!(emoji_query("`x` :ta", 7), Some((4, "ta".into())));
+    }
+
+    #[test]
+    fn channel_queries() {
+        assert_eq!(channel_query("see #", 5), Some((4, String::new())));
+        assert_eq!(channel_query("see #Rel", 8), Some((4, "rel".into())));
+        assert_eq!(channel_query("#dev-ops", 8), Some((0, "dev-ops".into())));
+        assert_eq!(channel_query("# Title", 7), None, "a heading");
+        assert_eq!(channel_query("issue#4", 7), None);
+        assert_eq!(channel_query("`#dev", 5), None);
+        let chans = vec![
+            (Uuid::from_u128(1), "release-planning".to_string()),
+            (Uuid::from_u128(2), "dev".to_string()),
+            (Uuid::from_u128(3), "devrel".to_string()),
+            (Uuid::from_u128(4), "web-dev".to_string()),
+            (Uuid::from_u128(5), "random".to_string()),
+        ];
+        let names = |q: &str| {
+            channel_matches(&chans, q, 6)
+                .into_iter()
+                .map(|c| c.1.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("dev"), vec!["dev", "devrel", "web-dev"]);
+        assert_eq!(names("plan"), vec!["release-planning"]);
+        assert_eq!(names("and"), vec!["random"]);
+        assert_eq!(channel_matches(&chans, "", 2).len(), 2);
+    }
+
+    #[test]
+    fn picks_become_entities_while_their_text_stays() {
+        let ann = Pick::User(Uuid::from_u128(1));
+        let dev = Pick::Channel(Uuid::from_u128(2));
+        let picked = vec![(dev, "#dev".to_string()), (ann, "@Ann".to_string())];
+        let got = picked_entities("@Ann see #dev-ops and #dev", &picked);
+        assert_eq!(
+            got,
+            vec![
+                Entity::Mention {
+                    user_id: Uuid::from_u128(1),
+                    start: 0,
+                    end: 4
+                },
+                Entity::ChannelLink {
+                    conversation_id: Uuid::from_u128(2),
+                    start: 22,
+                    end: 26
+                },
+            ],
+            "#dev-ops is another channel's name"
+        );
+        assert!(picked_entities("Ann and dev", &picked).is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The message list: a bounded window over the conversation, kept by the core.
 use leptos::html::{Div, Textarea};
 use leptos::prelude::*;
-use proto::model::{Entity, Member};
+use proto::model::{ConversationKind, Entity, Member};
 use proto::view::{ConnectionState, SendState};
 use proto::window::{Applied, MAX_WINDOW_ROWS, WindowBatch, WindowClient, WindowRow, WindowSpec};
 use serde_json::json;
@@ -1000,34 +1000,6 @@ fn anchor_of(ev: &web_sys::MouseEvent) -> (f64, f64) {
         .unwrap_or((0.0, 0.0))
 }
 
-/// Mention entities for the names picked from autocomplete that are still in the text.
-fn picked_entities(body: &str, picked: &[(Uuid, String)]) -> Vec<Entity> {
-    let mut taken: Vec<(usize, usize)> = vec![];
-    let mut out = vec![];
-    for (user_id, name) in picked {
-        let needle = format!("@{name}");
-        let hit = body
-            .match_indices(&needle)
-            .map(|(s, _)| (s, s + needle.len()))
-            .find(|(s, e)| {
-                body[*e..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !c.is_alphanumeric())
-                    && taken.iter().all(|(ts, te)| e <= ts || s >= te)
-            });
-        if let Some((s, e)) = hit {
-            taken.push((s, e));
-            out.push(Entity::Mention {
-                user_id: *user_id,
-                start: s as u32,
-                end: e as u32,
-            });
-        }
-    }
-    out
-}
-
 fn textarea(r: NodeRef<Textarea>) -> Option<web_sys::HtmlTextAreaElement> {
     r.get_untracked()
 }
@@ -1191,6 +1163,7 @@ fn keep_draft(
 enum Sigil {
     At,
     Colon,
+    Hash,
 }
 
 /// Autocomplete suggestions for what is being typed.
@@ -1199,6 +1172,7 @@ enum Hits {
     None,
     People(Vec<Member>),
     Emoji(Vec<emoji::Found>),
+    Channels(Vec<(Uuid, String)>),
 }
 
 impl Hits {
@@ -1207,12 +1181,14 @@ impl Hits {
             Hits::None => 0,
             Hits::People(v) => v.len(),
             Hits::Emoji(v) => v.len(),
+            Hits::Channels(v) => v.len(),
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
             Hits::Emoji(_) => "Emoji",
+            Hits::Channels(_) => "Channels",
             _ => "People to mention",
         }
     }
@@ -1229,7 +1205,7 @@ pub fn Composer(
     let c = ctx();
     let text = RwSignal::new(String::new());
     let draft_ready = RwSignal::new(false);
-    let picked = StoredValue::new(Vec::<(Uuid, String)>::new());
+    let picked = StoredValue::new(Vec::<(compose::Pick, String)>::new());
     let area: NodeRef<Textarea> = NodeRef::new();
     let hl: NodeRef<Div> = NodeRef::new();
     let boxes: NodeRef<Div> = NodeRef::new();
@@ -1333,6 +1309,21 @@ pub fn Composer(
         focus_composer(conversation_id, thread);
     }
 
+    // `#` offers this workspace's channels that the user is in.
+    let channels = Memo::new(move |_| {
+        c.conversation(crate::state::Selection {
+            account_id,
+            conversation_id,
+        })
+        .map(|(w, _)| {
+            w.conversations
+                .into_iter()
+                .filter(|v| matches!(v.kind, ConversationKind::Public | ConversationKind::Private))
+                .map(|v| (v.id, v.title.trim_start_matches('#').to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+    });
     let hits = Memo::new(move |_| match ac.get() {
         None => Hits::None,
         Some((Sigil::At, _, q)) => Hits::People(members.with(|ms| {
@@ -1343,6 +1334,12 @@ pub fn Composer(
                 .collect()
         })),
         Some((Sigil::Colon, _, q)) => Hits::Emoji(emoji::search(&q, 6)),
+        Some((Sigil::Hash, _, q)) => Hits::Channels(channels.with(|cs| {
+            compose::channel_matches(cs, &q, 6)
+                .into_iter()
+                .cloned()
+                .collect()
+        })),
     });
     let ac_open = move || hits.with(|h| h.len() > 0);
 
@@ -1354,6 +1351,9 @@ pub fn Composer(
             .then(|| {
                 compose::mention_query(&t, caret)
                     .map(|(at, q)| (Sigil::At, at, q))
+                    .or_else(|| {
+                        compose::channel_query(&t, caret).map(|(at, q)| (Sigil::Hash, at, q))
+                    })
                     .or_else(|| {
                         compose::emoji_query(&t, caret).map(|(at, q)| (Sigil::Colon, at, q))
                     })
@@ -1376,8 +1376,15 @@ pub fn Composer(
             Hits::None => return,
             Hits::People(v) => {
                 let Some(m) = v.get(i) else { return };
-                picked.update_value(|p| p.push((m.user_id, m.display_name.clone())));
-                format!("@{} ", m.display_name)
+                let name = format!("@{}", m.display_name);
+                picked.update_value(|p| p.push((compose::Pick::User(m.user_id), name.clone())));
+                format!("{name} ")
+            }
+            Hits::Channels(v) => {
+                let Some((id, name)) = v.get(i) else { return };
+                let name = format!("#{name}");
+                picked.update_value(|p| p.push((compose::Pick::Channel(*id), name.clone())));
+                format!("{name} ")
             }
             Hits::Emoji(v) => {
                 let Some(f) = v.get(i) else { return };
@@ -1393,7 +1400,7 @@ pub fn Composer(
         if body.trim().is_empty() {
             return;
         }
-        let mentions = picked.with_value(|p| picked_entities(&body, p));
+        let mentions = picked.with_value(|p| compose::picked_entities(&body, p));
         text.set(String::new());
         fence.set(false);
         picked.set_value(vec![]);
@@ -1455,7 +1462,7 @@ pub fn Composer(
             <div class="cwrap">
                 <div class="hlayer" aria-hidden="true" node_ref=hl>
                     <div class="hcbox" node_ref=boxes></div>
-                    {move || text.with(|t| picked.with_value(|p| layer::content(t, &picked_entities(t, p))))}
+                    {move || text.with(|t| picked.with_value(|p| layer::content(t, &compose::picked_entities(t, p))))}
                 </div>
                 <label class="visually-hidden" for=id.clone()>{label.clone()}</label>
                 <textarea id=id class="ctext over" node_ref=area rows=rows
@@ -1532,6 +1539,12 @@ pub fn Composer(
                                         {avatar(m.user_id, &m.display_name, "s")}
                                         <span class="acname">{m.display_name.clone()}</span>
                                         <span class="pres" class:online=online aria-label=if online { "online" } else { "offline" }></span>
+                                    }.into_any())
+                                }).collect::<Vec<_>>(),
+                                Hits::Channels(v) => v.into_iter().enumerate().map(|(i, (_, name))| {
+                                    option(i, view! {
+                                        <span class="acemo" aria-hidden="true">{icon(Icon::Hash)}</span>
+                                        <span class="acname">{name}</span>
                                     }.into_any())
                                 }).collect::<Vec<_>>(),
                                 Hits::Emoji(v) => v.into_iter().enumerate().map(|(i, f)| {
