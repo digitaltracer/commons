@@ -62,7 +62,7 @@ pub fn EmojiPicker(
     view! {
         <div class="backdrop" on:click=move |_| on_close.run(())></div>
         <div class=format!("picker {placement}") style=style role="dialog" aria-label="Pick an emoji"
-             on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { on_close.run(()) }>
+             on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); on_close.run(()) }>
             <Show when=move || recent.with(|r| !r.is_empty())>
                 <div class="ptitle">"Recent"</div>
                 <div class="pgrid" role="grid">

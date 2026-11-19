@@ -8,6 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
+use crate::compose;
 use crate::emoji::EmojiPicker;
 use crate::ipc;
 use crate::markdown::{self, Reader, mentions_me};
@@ -42,6 +43,7 @@ pub fn MessageList(
     #[prop(optional)] thread_root_id: Option<Uuid>,
     #[prop(into)] label: String,
 ) -> impl IntoView {
+    let c = ctx();
     let rows: RwSignal<Vec<WindowRow>> = RwSignal::new(vec![]);
     let total = RwSignal::new(0u32);
     let loaded = RwSignal::new(false);
@@ -49,6 +51,7 @@ pub fn MessageList(
     let sub_id = StoredValue::new(None::<u64>);
     let offset = StoredValue::new(0u32);
     let pinned = StoredValue::new(true);
+    let last_top = StoredValue::new(0i32);
     let anchor = StoredValue::new(None::<(Uuid, f64)>);
     let scroller: NodeRef<Div> = NodeRef::new();
 
@@ -99,6 +102,21 @@ pub fn MessageList(
                 if pinned.get_value() && thread_root_id.is_none() {
                     mark_read_soon(account_id, conversation_id);
                 }
+                let mine = new_rows
+                    .iter()
+                    .rev()
+                    .find(|r| {
+                        r.message.mine && r.message.state == SendState::Sent && !r.message.deleted
+                    })
+                    .map(|r| r.message.clone());
+                c.last_mine.update_value(|l| match mine {
+                    Some(m) => {
+                        l.insert((conversation_id, thread_root_id), m);
+                    }
+                    None => {
+                        l.remove(&(conversation_id, thread_root_id));
+                    }
+                });
                 rows.set(new_rows);
                 total.set(new_total);
                 loaded.set(true);
@@ -163,13 +181,43 @@ pub fn MessageList(
         );
     };
 
+    // Sending scrolls back to the newest message, moving the window there first if needed.
+    Effect::new(move |_| {
+        if c.repin.get() != Some((conversation_id, thread_root_id)) {
+            return;
+        }
+        c.repin.set(None);
+        pinned.set_value(true);
+        anchor.set_value(None);
+        if offset.get_value() > 0 {
+            offset.set_value(0);
+            if let Some(id) = sub_id.get_value() {
+                ipc::command(
+                    "move_window",
+                    json!({"accountId": account_id, "subId": id, "spec": spec(0)}),
+                );
+            }
+        } else if let Some(el) = scroller.get_untracked() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    });
+
     let on_scroll = move |_| {
         let Some(el) = scroller.get_untracked() else {
             return;
         };
         let top = el.scroll_top();
         let bottom_gap = el.scroll_height() - top - el.client_height();
-        pinned.set_value(bottom_gap < 40 && offset.get_value() == 0);
+        // Content growing under a pinned list fires scroll events too; only the reader
+        // scrolling up (or a window away from the end) unpins it.
+        if offset.get_value() > 0 {
+            pinned.set_value(false);
+        } else if bottom_gap < 40 {
+            pinned.set_value(true);
+        } else if top < last_top.get_value() - 1 {
+            pinned.set_value(false);
+        }
+        last_top.set_value(top);
         let loaded = rows.with_untracked(|r| r.len() as u32);
         let off = offset.get_value();
         if top < 200 && off + loaded < total.get_untracked() && anchor.get_value().is_none() {
@@ -179,6 +227,30 @@ pub fn MessageList(
         }
     };
     spike::register_scroller(scroller);
+
+    // While pinned, any change in the rows' or the viewport's height keeps the newest row in view.
+    let content: NodeRef<Div> = NodeRef::new();
+    let observer = StoredValue::new_local(None::<ipc::ResizeObserver>);
+    Effect::new(move |_| {
+        let (Some(el), Some(inner)) = (scroller.get(), content.get()) else {
+            return;
+        };
+        if observer.with_value(|o| o.is_some()) {
+            return;
+        }
+        let target = el.clone();
+        let ro = ipc::on_resize(&[&el, &inner], move || {
+            if pinned.get_value() && anchor.with_value(|a| a.is_none()) {
+                target.set_scroll_top(target.scroll_height());
+            }
+        });
+        observer.set_value(Some(ro));
+    });
+    on_cleanup(move || {
+        if let Some(Some(o)) = observer.try_update_value(|o| o.take()) {
+            o.disconnect();
+        }
+    });
 
     // Day dividers sit above the first row of each day; a thread's root gets a reply count.
     let shown = move || {
@@ -208,6 +280,7 @@ pub fn MessageList(
         <div class="list" node_ref=scroller on:scroll=on_scroll role="log" aria-live="polite"
              aria-label=label tabindex="0">
             <div class="spacer"></div>
+            <div class="lin" node_ref=content>
             {move || (loaded.get() && rows.with(|r| r.is_empty())).then(|| empty(account_id, conversation_id, thread_root_id))}
             <For each=shown key=|(r, d)| (r.key, r.version, d.clone()) let:item>
                 {item.1.map(|d| if d.is_empty() {
@@ -218,6 +291,7 @@ pub fn MessageList(
                 <Message account_id=account_id conversation_id=conversation_id row=item.0
                          in_thread=thread_root_id.is_some() />
             </For>
+            </div>
         </div>
     }
 }
@@ -411,11 +485,29 @@ fn Message(
         "msg"
     };
     let author = m.author_name.clone();
-    let body = (!m.deleted).then(|| {
-        view! {
-            <div class="body">{markdown::body(&m.body, &m.entities, reader, m.edited)}</div>
+    let (src, entities, edited, deleted) =
+        (m.body.clone(), m.entities.clone(), m.edited, m.deleted);
+    let editing_me = move || c.editing.with(|e| e.as_ref().is_some_and(|e| e.id == id));
+    let body = move || {
+        if deleted {
+            None
+        } else if editing_me() {
+            Some(view! { <InlineEdit account_id=account_id conversation_id=conversation_id in_thread=in_thread /> }.into_any())
+        } else {
+            Some(
+                view! { <div class="body">{markdown::body(&src, &entities, reader, edited)}</div> }
+                    .into_any(),
+            )
         }
-    });
+    };
+    let confirm = RwSignal::new(None::<(f64, f64)>);
+    let delete = move || {
+        confirm.set(None);
+        ipc::command(
+            "delete_message",
+            json!({"accountId": account_id, "conversationId": conversation_id, "messageId": id}),
+        );
+    };
     let aria = if pending {
         "Your message, waiting to send".to_string()
     } else {
@@ -451,9 +543,9 @@ fn Message(
                     {mine.then(|| {
                         let target = edit_target.clone();
                         view! {
-                            <button class="iconbtn" aria-label="Edit message" on:click=move |_| c.editing.set(Some(target.clone()))>{icon(Icon::Edit)}</button>
-                            <button class="iconbtn" aria-label="Delete message" on:click=move |_| ipc::command("delete_message", json!({
-                                "accountId": account_id, "conversationId": conversation_id, "messageId": id}))>{icon(Icon::Trash)}</button>
+                            <button class="iconbtn" aria-label="Edit message" on:click=move |_| c.edit(target.clone())>{icon(Icon::Edit)}</button>
+                            <button class="iconbtn" aria-label="Delete message" aria-haspopup="dialog"
+                                on:click=move |ev| confirm.set(Some(anchor_of(&ev)))>{icon(Icon::Trash)}</button>
                         }
                     })}
                 </div>
@@ -462,6 +554,44 @@ fn Message(
                 <EmojiPicker account_id=account_id at=at on_pick=Callback::new(react)
                     on_close=Callback::new(move |_| picking.set(None)) />
             })}
+            {move || confirm.get().map(|at| view! {
+                <ConfirmDelete at=at on_delete=Callback::new(move |_| delete())
+                    on_close=Callback::new(move |_| confirm.set(None)) />
+            })}
+        </div>
+    }
+}
+
+/// Asks before deleting a message, in a small popover at the trash button.
+#[component]
+fn ConfirmDelete(at: (f64, f64), on_delete: Callback<()>, on_close: Callback<()>) -> impl IntoView {
+    let yes: NodeRef<leptos::html::Button> = NodeRef::new();
+    Effect::new(move |_| {
+        if let Some(b) = yes.get() {
+            let _ = b.focus();
+        }
+    });
+    let h = web_sys::window()
+        .and_then(|w| w.inner_height().ok())
+        .and_then(|v| v.as_f64())
+        .unwrap_or(800.0);
+    let (x, y) = at;
+    let top = if y + 130.0 > h {
+        y - 34.0 - 120.0
+    } else {
+        y + 6.0
+    };
+    let style = format!("left: {}px; top: {}px", (x - 264.0).max(8.0), top.max(8.0));
+    view! {
+        <div class="backdrop" on:click=move |_| on_close.run(())></div>
+        <div class="confirm" style=style role="alertdialog" aria-labelledby="del-t" aria-describedby="del-d"
+            on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); on_close.run(()) }>
+            <p id="del-t" class="ctitle">"Delete this message?"</p>
+            <p id="del-d" class="muted">"It's removed for everyone in the conversation. This can't be undone."</p>
+            <div class="crow">
+                <button type="button" class="btn" on:click=move |_| on_close.run(())>"Cancel"</button>
+                <button type="button" class="btn dangerfill" node_ref=yes on:click=move |_| on_delete.run(())>"Delete"</button>
+            </div>
         </div>
     }
 }
@@ -475,26 +605,6 @@ fn anchor_of(ev: &web_sys::MouseEvent) -> (f64, f64) {
             (r.right(), r.bottom())
         })
         .unwrap_or((0.0, 0.0))
-}
-
-/// An `@` name being typed: where the `@` is (byte offset) and the text after it.
-fn mention_query(text: &str, caret: usize) -> Option<(usize, String)> {
-    let before = &text[..caret];
-    let at = before.rfind('@')?;
-    if at > 0 && !before[..at].ends_with(|c: char| c.is_whitespace() || "([{".contains(c)) {
-        return None;
-    }
-    let q = &before[at + 1..];
-    if q.len() > 32 || q.contains('\n') || q.starts_with(' ') {
-        return None;
-    }
-    Some((at, q.to_string()))
-}
-
-fn matches_query(name: &str, q: &str) -> bool {
-    let q = q.to_lowercase();
-    let n = name.to_lowercase();
-    n.starts_with(&q) || n.split_whitespace().any(|w| w.starts_with(&q))
 }
 
 /// Mention entities for the names picked from autocomplete that are still in the text.
@@ -563,6 +673,113 @@ fn selection(text: &str, r: NodeRef<Textarea>) -> (usize, usize) {
         .unwrap_or((text.len(), text.len()))
 }
 
+/// Text before the caret, for the fence rule.
+fn before_caret(text: RwSignal<String>, r: NodeRef<Textarea>) -> String {
+    let t = text.get_untracked();
+    let (s, _) = selection(&t, r);
+    t[..s].to_string()
+}
+
+/// Wraps the selection in `marks`, or puts the caret between a pair of them.
+fn wrap(text: RwSignal<String>, r: NodeRef<Textarea>, before: &str, after: &str) {
+    let t = text.get_untracked();
+    let (s, e) = selection(&t, r);
+    let inner = &t[s..e];
+    splice(
+        text,
+        r,
+        s,
+        e,
+        &format!("{before}{inner}{after}"),
+        after.len(),
+    );
+}
+
+/// ⌘B, ⌘I, ⌘E and ⌘⇧X. Returns whether the key was a formatting shortcut.
+fn format_shortcut(
+    ev: &web_sys::KeyboardEvent,
+    text: RwSignal<String>,
+    r: NodeRef<Textarea>,
+) -> bool {
+    if !ev.meta_key() || ev.alt_key() || ev.ctrl_key() {
+        return false;
+    }
+    match compose::shortcut_markers(&ev.key(), ev.shift_key()) {
+        Some(m) => {
+            ev.prevent_default();
+            wrap(text, r, m, m);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The DOM id of a conversation's or thread's composer.
+pub fn composer_id(conversation_id: Uuid, thread: bool) -> String {
+    format!("composer-{conversation_id}-{thread}")
+}
+
+pub fn focus_composer(conversation_id: Uuid, thread: bool) {
+    let id = composer_id(conversation_id, thread);
+    ipc::next_frame(move || {
+        if let Some(el) = document()
+            .get_element_by_id(&id)
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = el.focus();
+        }
+    });
+}
+
+/// Keeps a composer's text in the core on a short debounce, and once more as it closes.
+fn keep_draft(
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    text: RwSignal<String>,
+    ready: RwSignal<bool>,
+) {
+    let save = move |t: String| {
+        ipc::command(
+            "save_composer_draft",
+            json!({"accountId": account_id, "conversationId": conversation_id,
+                   "threadRootId": thread_root_id, "text": t}),
+        )
+    };
+    // Plain shared cells: the cleanup below runs after this component's signals are gone.
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let generation = StoredValue::new(0u32);
+    let p = pending.clone();
+    Effect::new(move |_| {
+        let t = text.get();
+        if !ready.get() {
+            return;
+        }
+        if let Ok(mut slot) = p.lock() {
+            *slot = Some(t);
+        }
+        let n = generation.get_value() + 1;
+        generation.set_value(n);
+        let p = p.clone();
+        set_timeout(
+            move || {
+                if generation.try_get_value() != Some(n) {
+                    return;
+                }
+                if let Some(t) = p.lock().ok().and_then(|mut s| s.take()) {
+                    save(t);
+                }
+            },
+            std::time::Duration::from_millis(400),
+        );
+    });
+    on_cleanup(move || {
+        if let Some(t) = pending.lock().ok().and_then(|mut s| s.take()) {
+            save(t);
+        }
+    });
+}
+
 #[component]
 pub fn Composer(
     account_id: Uuid,
@@ -573,6 +790,7 @@ pub fn Composer(
 ) -> impl IntoView {
     let c = ctx();
     let text = RwSignal::new(String::new());
+    let draft_ready = RwSignal::new(false);
     let picked = StoredValue::new(Vec::<(Uuid, String)>::new());
     let area: NodeRef<Textarea> = NodeRef::new();
     let last_typing = StoredValue::new(0f64);
@@ -580,8 +798,35 @@ pub fn Composer(
     let ac = RwSignal::new(None::<(usize, String)>);
     let ac_index = RwSignal::new(0usize);
     let emoji = RwSignal::new(false);
+    let fence = RwSignal::new(false);
     let me = c.me(account_id).unwrap_or_default();
     let offline = move || c.connection(account_id) != ConnectionState::Online;
+    let thread = thread_root_id.is_some();
+
+    keep_draft(
+        account_id,
+        conversation_id,
+        thread_root_id,
+        text,
+        draft_ready,
+    );
+    let refresh_fence = move || {
+        let t = text.get_untracked();
+        let (caret, _) = selection(&t, area);
+        fence.set(compose::in_open_fence(&t[..caret]));
+    };
+    leptos::task::spawn_local(async move {
+        let args = json!({"accountId": account_id, "conversationId": conversation_id,
+                          "threadRootId": thread_root_id});
+        let saved = ipc::invoke::<Option<String>>("composer_draft", args).await;
+        if let Ok(Some(t)) = saved
+            && text.with_untracked(|x| x.is_empty())
+        {
+            text.set(t);
+            ipc::next_frame(refresh_fence);
+        }
+        draft_ready.set(true);
+    });
 
     // Autocomplete offers the conversation's members; the workspace list stands in offline.
     leptos::task::spawn_local(async move {
@@ -611,12 +856,19 @@ pub fn Composer(
     Effect::new(move |_| {
         if let Some((conv, body)) = c.refill.get()
             && conv == conversation_id
-            && thread_root_id.is_none()
+            && !thread
         {
             c.refill.set(None);
             text.set(body);
         }
     });
+
+    // Opening a conversation puts the caret here, unless the sidebar keyboard opened it.
+    let keyboard = c.keyboard_open.get_value();
+    c.keyboard_open.set_value(false);
+    if thread || !keyboard {
+        focus_composer(conversation_id, thread);
+    }
 
     let suggestions = move || {
         let Some((_, q)) = ac.get() else {
@@ -624,17 +876,20 @@ pub fn Composer(
         };
         members.with(|ms| {
             ms.iter()
-                .filter(|m| m.user_id != me && matches_query(&m.display_name, &q))
+                .filter(|m| m.user_id != me && compose::matches_query(&m.display_name, &q))
                 .take(6)
                 .cloned()
                 .collect::<Vec<_>>()
         })
     };
 
-    let refresh_ac = move || {
+    let refresh = move || {
         let t = text.get_untracked();
         let (caret, end) = selection(&t, area);
-        let q = (caret == end).then(|| mention_query(&t, caret)).flatten();
+        fence.set(compose::in_open_fence(&t[..caret]));
+        let q = (caret == end)
+            .then(|| compose::mention_query(&t, caret))
+            .flatten();
         if q.is_none() || q.as_ref().map(|x| &x.1) != ac.get_untracked().as_ref().map(|x| &x.1) {
             ac_index.set(0);
         }
@@ -659,8 +914,10 @@ pub fn Composer(
         }
         let mentions = picked.with_value(|p| picked_entities(&body, p));
         text.set(String::new());
+        fence.set(false);
         picked.set_value(vec![]);
         ac.set(None);
+        c.repin.set(Some((conversation_id, thread_root_id)));
         ipc::command(
             "send_message",
             json!({"accountId": account_id, "conversationId": conversation_id,
@@ -668,25 +925,19 @@ pub fn Composer(
         );
     };
 
-    let wrap = move |before: &'static str, after: &'static str| {
-        let t = text.get_untracked();
-        let (s, e) = selection(&t, area);
-        let inner = t[s..e].to_string();
-        splice(
-            text,
-            area,
-            s,
-            e,
-            &format!("{before}{inner}{after}"),
-            after.len(),
-        );
-    };
-    let list = move || {
+    let list = move |marker: &'static str| {
         let t = text.get_untracked();
         let (s, _) = selection(&t, area);
         let line = t[..s].rfind('\n').map_or(0, |i| i + 1);
-        splice(text, area, line, line, "- ", 0);
-        let _ = s;
+        splice(text, area, line, line, marker, 0);
+    };
+    let block = move || {
+        let t = text.get_untracked();
+        let (s, e) = selection(&t, area);
+        let start = s == 0 || t[..s].ends_with('\n');
+        let (insert, back) = compose::code_block(&t[s..e], start);
+        splice(text, area, s, e, &insert, back);
+        ipc::next_frame(refresh);
     };
 
     let attach_error = RwSignal::new(None::<String>);
@@ -708,21 +959,17 @@ pub fn Composer(
     };
     let rows =
         move || text.with(|t| t.lines().count().clamp(1, 8) + usize::from(t.ends_with('\n')));
-    let id = format!("composer-{conversation_id}-{}", thread_root_id.is_some());
+    let id = composer_id(conversation_id, thread);
     let placeholder2 = placeholder.clone();
-    let full = thread_root_id.is_none();
+    let fmt = |label: &'static str, i: Icon, marks: &'static str| {
+        view! {
+            <button type="button" class="iconbtn" aria-label=label title=label
+                on:click=move |_| wrap(text, area, marks, marks)>{icon(i)}</button>
+        }
+    };
 
     view! {
         <div class="comp">
-            {full.then(|| view! {
-                <div class="ctool" role="toolbar" aria-label="Formatting">
-                    <button type="button" class="iconbtn" aria-label="Bold" on:click=move |_| wrap("**", "**")>{icon(Icon::Bold)}</button>
-                    <button type="button" class="iconbtn" aria-label="Italic" on:click=move |_| wrap("_", "_")>{icon(Icon::Italic)}</button>
-                    <button type="button" class="iconbtn" aria-label="Code" on:click=move |_| wrap("`", "`")>{icon(Icon::Code)}</button>
-                    <button type="button" class="iconbtn" aria-label="Link" on:click=move |_| wrap("[", "](https://)")>{icon(Icon::Link)}</button>
-                    <button type="button" class="iconbtn" aria-label="Bulleted list" on:click=move |_| list()>{icon(Icon::List)}</button>
-                </div>
-            })}
             <div class="cwrap">
                 <label class="visually-hidden" for=id.clone()>{label.clone()}</label>
                 <textarea id=id class="ctext" node_ref=area rows=rows
@@ -735,15 +982,19 @@ pub fn Composer(
                     prop:value=move || text.get()
                     on:input=move |ev| {
                         text.set(event_target_value(&ev));
-                        refresh_ac();
+                        refresh();
                         let now = ipc::now_ms();
                         if now - last_typing.get_value() > 3000.0 {
                             last_typing.set_value(now);
                             ipc::command("typing", json!({"accountId": account_id, "conversationId": conversation_id}));
                         }
                     }
-                    on:click=move |_| refresh_ac()
+                    on:click=move |_| refresh()
+                    on:keyup=move |ev: web_sys::KeyboardEvent| if ev.key().starts_with("Arrow") { refresh() }
                     on:keydown=move |ev: web_sys::KeyboardEvent| {
+                        if ev.is_composing() {
+                            return;
+                        }
                         let s = suggestions();
                         if !s.is_empty() {
                             match ev.key().as_str() {
@@ -754,9 +1005,24 @@ pub fn Composer(
                                 _ => {}
                             }
                         }
-                        if ev.key() == "Enter" && !ev.shift_key() {
-                            ev.prevent_default();
-                            send();
+                        if format_shortcut(&ev, text, area) {
+                            return;
+                        }
+                        match ev.key().as_str() {
+                            "Enter" => {
+                                if compose::on_return(ev.meta_key(), ev.shift_key(), &before_caret(text, area)) == compose::Return::Send {
+                                    ev.prevent_default();
+                                    send();
+                                }
+                            }
+                            "ArrowUp" if !ev.shift_key() && !ev.meta_key() && !ev.alt_key()
+                                && text.with_untracked(|t| t.is_empty()) => {
+                                if let Some(m) = c.last_mine.with_value(|l| l.get(&(conversation_id, thread_root_id)).cloned()) {
+                                    ev.prevent_default();
+                                    c.edit(m);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 ></textarea>
@@ -778,20 +1044,33 @@ pub fn Composer(
                     </ul>
                 </Show>
             </div>
-            <div class="cfoot">
-                <button type="button" class="iconbtn" on:click=attach aria-label="Attach a file"
+            <div class="cfoot" role="toolbar" aria-label="Formatting and attachments">
+                <span class="cgroup">
+                    {fmt("Bold, Command B", Icon::Bold, "**")}
+                    {fmt("Italic, Command I", Icon::Italic, "_")}
+                    {fmt("Strikethrough, Command Shift X", Icon::Strike, "~~")}
+                    {fmt("Inline code, Command E", Icon::Code, "`")}
+                    <button type="button" class="iconbtn" aria-label="Code block" title="Code block"
+                        aria-pressed=move || fence.get().to_string() on:click=move |_| block()>{icon(Icon::CodeBlock)}</button>
+                </span>
+                <span class="vsep cgroup2"></span>
+                <span class="cgroup2">
+                    <button type="button" class="iconbtn" aria-label="Link" title="Link" on:click=move |_| wrap(text, area, "[", "](https://)")>{icon(Icon::Link)}</button>
+                    <button type="button" class="iconbtn" aria-label="Bulleted list" title="Bulleted list" on:click=move |_| list("- ")>{icon(Icon::List)}</button>
+                    <button type="button" class="iconbtn" aria-label="Numbered list" title="Numbered list" on:click=move |_| list("1. ")>{icon(Icon::NumberedList)}</button>
+                </span>
+                <span class="vsep"></span>
+                <button type="button" class="iconbtn" on:click=attach aria-label="Attach a file" title="Attach a file"
                     disabled=move || attaching.get() || offline()>{icon(Icon::Attach)}</button>
-                {full.then(|| view! {
-                    <button type="button" class="iconbtn" aria-label="Mention someone" on:click=move |_| {
-                        let t = text.get_untracked();
-                        let (s, e) = selection(&t, area);
-                        let lead = if s == 0 || t[..s].ends_with(char::is_whitespace) { "@" } else { " @" };
-                        splice(text, area, s, e, lead, 0);
-                        ipc::next_frame(refresh_ac);
-                    }>{icon(Icon::At)}</button>
-                })}
+                <button type="button" class="iconbtn" aria-label="Mention someone" title="Mention someone" on:click=move |_| {
+                    let t = text.get_untracked();
+                    let (s, e) = selection(&t, area);
+                    let lead = if s == 0 || t[..s].ends_with(char::is_whitespace) { "@" } else { " @" };
+                    splice(text, area, s, e, lead, 0);
+                    ipc::next_frame(refresh);
+                }>{icon(Icon::At)}</button>
                 <span class="emowrap">
-                    <button type="button" class="iconbtn" aria-label="Emoji" on:click=move |_| emoji.set(true)>{icon(Icon::Smile)}</button>
+                    <button type="button" class="iconbtn" aria-label="Emoji" title="Emoji" on:click=move |_| emoji.set(true)>{icon(Icon::Smile)}</button>
                     <Show when=move || emoji.get()>
                         <EmojiPicker account_id=account_id placement="up"
                             on_pick=Callback::new(move |e: String| {
@@ -804,9 +1083,15 @@ pub fn Composer(
                     </Show>
                 </span>
                 {move || attaching.get().then(|| view! { <span class="hint">"Uploading…"</span> })}
-                <span class="hint">{move || if c.connection(account_id) == ConnectionState::SignedOut { "Signed out · messages wait in your outbox" }
-                    else if offline() { "Offline · messages wait in your outbox" }
-                    else if full { "Markdown · Return to send · Shift-Return for a new line" } else { "" }}</span>
+                <span class="hint">{move || if c.connection(account_id) == ConnectionState::SignedOut {
+                        view! { "Signed out · messages wait in your outbox" }.into_any()
+                    } else if offline() {
+                        view! { "Offline · messages wait in your outbox" }.into_any()
+                    } else if fence.get() {
+                        view! { <b>"Code block"</b>" · Return adds a line · ⌘Return sends" }.into_any()
+                    } else {
+                        view! { "Return to send · ⇧Return new line" }.into_any()
+                    }}</span>
                 <button type="button" class="sendbtn" aria-label=move || if offline() { "Queue message" } else { "Send" }
                     on:click=move |_| send()>{icon(Icon::Send)}</button>
             </div>
@@ -815,42 +1100,62 @@ pub fn Composer(
     }
 }
 
+/// One of my messages being edited in its row.
 #[component]
-pub fn EditBar(account_id: Uuid, conversation_id: Uuid) -> impl IntoView {
+fn InlineEdit(account_id: Uuid, conversation_id: Uuid, in_thread: bool) -> impl IntoView {
     let c = ctx();
-    let text = RwSignal::new(String::new());
-    Effect::new(move |_| {
-        if let Some(m) = c.editing.get() {
-            text.set(m.body.clone());
-        }
-    });
+    let area: NodeRef<Textarea> = NodeRef::new();
+    let text = c.edit_text;
+    let close = move || {
+        c.editing.set(None);
+        focus_composer(conversation_id, in_thread);
+    };
     let save = move || {
-        if let Some(m) = c.editing.get_untracked() {
+        let body = text.get_untracked();
+        if let Some(m) = c.editing.get_untracked()
+            && !body.trim().is_empty()
+            && body != m.body
+        {
             ipc::command(
                 "edit_message",
                 json!({"accountId": account_id, "conversationId": conversation_id,
-                       "messageId": m.id, "baseRevision": m.revision, "body": text.get_untracked()}),
+                       "messageId": m.id, "baseRevision": m.revision, "body": body}),
             );
         }
-        c.editing.set(None);
+        close();
     };
+    Effect::new(move |_| {
+        if let Some(el) = area.get() {
+            let n = el.value().encode_utf16().count() as u32;
+            let _ = el.focus();
+            let _ = el.set_selection_range(n, n);
+        }
+    });
+    let rows =
+        move || text.with(|t| t.lines().count().clamp(1, 12) + usize::from(t.ends_with('\n')));
     view! {
-        {move || c.editing.get().map(|_| view! {
-            <form class="comp editbar" on:submit=move |ev| { ev.prevent_default(); save(); }>
-                <div class="ebanner">{sized(Icon::Edit, 14)}"Editing your message"</div>
-                <label class="visually-hidden" for="edit-box">"Edit message"</label>
-                <textarea id="edit-box" class="ctext" rows="2" prop:value=move || text.get()
-                    on:input=move |ev| text.set(event_target_value(&ev))
-                    on:keydown=move |ev: web_sys::KeyboardEvent| {
-                        if ev.key() == "Enter" && !ev.shift_key() { ev.prevent_default(); save(); }
-                        if ev.key() == "Escape" { c.editing.set(None); }
-                    }></textarea>
-                <div class="cfoot">
-                    <span class="hint">"Return to save · Escape to cancel"</span>
-                    <button type="button" class="btn" on:click=move |_| c.editing.set(None)>"Cancel"</button>
-                    <button type="submit" class="btn primary">"Save"</button>
-                </div>
-            </form>
-        })}
+        <div class="comp inedit">
+            <label class="visually-hidden" for="edit-box">"Edit message"</label>
+            <textarea id="edit-box" class="ctext" node_ref=area rows=rows prop:value=move || text.get()
+                on:input=move |ev| text.set(event_target_value(&ev))
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if ev.is_composing() || format_shortcut(&ev, text, area) {
+                        return;
+                    }
+                    match ev.key().as_str() {
+                        "Enter" if compose::on_return(ev.meta_key(), ev.shift_key(), &before_caret(text, area)) == compose::Return::Send => {
+                            ev.prevent_default();
+                            save();
+                        }
+                        "Escape" => { ev.prevent_default(); close(); }
+                        _ => {}
+                    }
+                }></textarea>
+            <div class="cfoot">
+                <span class="hint left">"Escape to cancel · Return to save"</span>
+                <button type="button" class="btn" on:click=move |_| close()>"Cancel"</button>
+                <button type="button" class="btn primary" on:click=move |_| save()>"Save"</button>
+            </div>
+        </div>
     }
 }

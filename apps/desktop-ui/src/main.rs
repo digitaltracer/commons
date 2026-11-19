@@ -2,6 +2,7 @@
 //! are meant to become the browser client. All state and behaviour live in the core: these
 //! views send commands and render view models.
 mod app;
+mod compose;
 mod emoji;
 mod ipc;
 mod markdown;

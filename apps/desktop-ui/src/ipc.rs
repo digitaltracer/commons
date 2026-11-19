@@ -91,3 +91,30 @@ pub fn next_frame(f: impl FnOnce() + 'static) {
         let _ = w.request_animation_frame(cb.unchecked_ref());
     }
 }
+
+// web-sys has no ResizeObserver feature enabled here, so bind the one call we need.
+#[wasm_bindgen]
+extern "C" {
+    pub type ResizeObserver;
+
+    #[wasm_bindgen(constructor)]
+    pub fn new(callback: &js_sys::Function) -> ResizeObserver;
+
+    #[wasm_bindgen(method)]
+    pub fn observe(this: &ResizeObserver, target: &web_sys::Element);
+
+    #[wasm_bindgen(method)]
+    pub fn disconnect(this: &ResizeObserver);
+}
+
+/// Calls `f` whenever any of `targets` changes size, until the returned observer disconnects.
+pub fn on_resize(targets: &[&web_sys::Element], f: impl FnMut() + 'static) -> ResizeObserver {
+    let cb = Closure::<dyn FnMut()>::new(f);
+    let ro = ResizeObserver::new(cb.as_ref().unchecked_ref());
+    // The observer owns the callback from here; it stops firing once disconnected.
+    cb.forget();
+    for t in targets {
+        ro.observe(t);
+    }
+    ro
+}

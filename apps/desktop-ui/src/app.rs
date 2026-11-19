@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::ipc;
-use crate::messages::{Composer, EditBar, MessageList};
+use crate::messages::{Composer, MessageList, focus_composer};
 use crate::panels::{
     InvitePeople, JoinInvite, Members, Person, Prefs, SESSION_PASSWORD, SessionCard, SignInAgain,
     Tools,
@@ -126,10 +126,28 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |prev: Option<Option<Selection>>| {
         let now = c.selected.get();
-        if prev.flatten() != now {
+        let before = prev.flatten();
+        if before != now {
             c.aside.set(Aside::None);
             c.typing.set(vec![]);
-            c.editing.set(None);
+            // An edit left open waits for its conversation to come back.
+            if let (Some(b), Some(m)) = (before, c.editing.get_untracked()) {
+                let t = c.edit_text.get_untracked();
+                c.edits.update_value(|e| {
+                    e.insert(b.conversation_id, (m, t));
+                });
+            }
+            match now.and_then(|n| {
+                c.edits
+                    .try_update_value(|e| e.remove(&n.conversation_id))
+                    .flatten()
+            }) {
+                Some((m, t)) => {
+                    c.edit_text.set(t);
+                    c.editing.set(Some(m));
+                }
+                None => c.editing.set(None),
+            }
         }
         if let Some(s) = now {
             ipc::command(
@@ -146,6 +164,19 @@ pub fn App() -> impl IntoView {
     );
 
     let _keys = window_event_listener(leptos::ev::keydown, move |ev| {
+        // Escape closes the side panel unless something on the way up used it.
+        if ev.key() == "Escape"
+            && !ev.default_prevented()
+            && c.overlay.get_untracked() == Overlay::None
+            && c.aside.get_untracked() != Aside::None
+        {
+            ev.prevent_default();
+            c.aside.set(Aside::None);
+            if let Some(sel) = c.selected.get_untracked() {
+                focus_composer(sel.conversation_id, false);
+            }
+            return;
+        }
         if !ev.meta_key() {
             return;
         }
@@ -356,6 +387,9 @@ fn Side() -> impl IntoView {
         if cv.pending > 0 {
             label.push_str(&format!(", {} waiting to send", cv.pending));
         }
+        if cv.has_draft {
+            label.push_str(", draft");
+        }
         let peer = (cv.kind == ConversationKind::Dm)
             .then(|| cv.peer_ids.first().copied())
             .flatten();
@@ -370,12 +404,17 @@ fn Side() -> impl IntoView {
         view! {
             <button class="row" class:unread=unread class:sel=current class:muted=cv.muted
                 aria-current=move || if current() { "page" } else { "false" } aria-label=label
-                on:click=move |_| c.open(account_id, sel.conversation_id)>
+                on:click=move |ev| {
+                    // A click from Return or Space has no pointer detail; keep focus in the sidebar.
+                    c.keyboard_open.set_value(ev.detail() == 0);
+                    c.open(account_id, sel.conversation_id);
+                }>
                 {conversation_icon(&cv)}
                 <span class="rt">{title}</span>
                 {peer.map(|p| view! { <span class="pres" class:online=move || c.online(account_id, p)></span> })}
                 {cv.muted.then(|| sized(Icon::BellOff, 13))}
                 {(cv.pending > 0).then(|| view! { <span class="rpend" role="img" aria-label=format!("{} waiting to send", cv.pending)>{sized(Icon::Clock, 14)}</span> })}
+                {(cv.has_draft && count == 0 && cv.pending == 0).then(|| view! { <span class="rdraft">{sized(Icon::Edit, 13)}</span> })}
                 {(count > 0).then(|| view! { <span class="cnt">{count}</span> })}
             </button>
         }
@@ -637,7 +676,6 @@ fn Conversation(sel: Selection) -> impl IntoView {
             <Banner account_id=sel.account_id />
             {drafts}
             <MessageList account_id=sel.account_id conversation_id=sel.conversation_id label=list_label />
-            <EditBar account_id=sel.account_id conversation_id=sel.conversation_id />
             <SessionCard account_id=sel.account_id />
             <Composer account_id=sel.account_id conversation_id=sel.conversation_id
                 label=message_label.clone() placeholder=message_label />

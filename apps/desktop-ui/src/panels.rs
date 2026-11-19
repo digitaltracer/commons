@@ -17,7 +17,7 @@ pub fn Dialog(#[prop(into)] label: String, children: Children) -> impl IntoView 
     view! {
         <div class="scrim" on:click=move |_| c.overlay.set(Overlay::None)></div>
         <section class="pop dlg" role="dialog" aria-modal="true" aria-label=aria
-            on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { c.overlay.set(Overlay::None) }>
+            on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); c.overlay.set(Overlay::None) }>
             <header class="dhead">
                 <h2>{label}</h2>
                 <button class="iconbtn" aria-label="Close" on:click=move |_| c.overlay.set(Overlay::None)>{icon(Icon::Close)}</button>
@@ -794,16 +794,6 @@ pub fn SignInAgain(account_id: Uuid) -> impl IntoView {
     }
 }
 
-/// Copies text to the clipboard. Returns false when the webview refused.
-async fn copy(text: &str) -> bool {
-    let Some(w) = web_sys::window() else {
-        return false;
-    };
-    wasm_bindgen_futures::JsFuture::from(w.navigator().clipboard().write_text(text))
-        .await
-        .is_ok()
-}
-
 /// Creates a single-use invite link for one email address and copies it (owners and admins).
 #[component]
 pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
@@ -834,7 +824,7 @@ pub fn InvitePeople(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
         leptos::task::spawn_local(async move {
             match ipc::invoke::<proto::api::InviteCreated>("create_invite", args).await {
                 Ok(i) => {
-                    let copied = copy(&i.link).await;
+                    let copied = crate::ui::copy_text(&i.link).await;
                     let until = js_sys::Date::new(&(i.invite.expires_at_ms as f64).into())
                         .to_locale_date_string("default", &js_sys::Object::new())
                         .as_string()

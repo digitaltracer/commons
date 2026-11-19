@@ -78,7 +78,17 @@ pub struct Ctx {
     pub query: RwSignal<String>,
     pub overlay: RwSignal<Overlay>,
     pub adding: RwSignal<bool>,
+    /// The message being edited in place, and its text so far.
     pub editing: RwSignal<Option<MessageView>>,
+    pub edit_text: RwSignal<String>,
+    /// Edits left open in other conversations this session, by conversation.
+    pub edits: StoredValue<HashMap<Uuid, (MessageView, String)>>,
+    /// Each list's newest message of mine, for ↑ in an empty composer.
+    pub last_mine: StoredValue<HashMap<(Uuid, Option<Uuid>), MessageView>>,
+    /// A list to scroll back to its newest message (after a send).
+    pub repin: RwSignal<Option<(Uuid, Option<Uuid>)>>,
+    /// The last open came from the keyboard in the sidebar, so focus stays there.
+    pub keyboard_open: StoredValue<bool>,
     /// Text to put back in a conversation's composer (editing a queued send).
     pub refill: RwSignal<Option<(Uuid, String)>>,
     /// Seconds tick, for reconnect countdowns.
@@ -110,6 +120,11 @@ impl Ctx {
             overlay: RwSignal::new(Overlay::None),
             adding: RwSignal::new(false),
             editing: RwSignal::new(None),
+            edit_text: RwSignal::new(String::new()),
+            edits: StoredValue::new(HashMap::new()),
+            last_mine: StoredValue::new(HashMap::new()),
+            repin: RwSignal::new(None),
+            keyboard_open: StoredValue::new(false),
             refill: RwSignal::new(None),
             now: RwSignal::new(js_sys::Date::now()),
             notice: RwSignal::new(None),
@@ -216,6 +231,12 @@ impl Ctx {
             Some(c) => self.open(account_id, c),
             None => self.selected.set(None),
         }
+    }
+
+    /// Starts editing one of my messages in its row.
+    pub fn edit(&self, m: MessageView) {
+        self.edit_text.set(m.body.clone());
+        self.editing.set(Some(m));
     }
 
     /// Every workspace in switcher order, for ⌘1…⌘9.

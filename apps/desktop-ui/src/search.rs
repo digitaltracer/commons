@@ -223,7 +223,7 @@ pub fn SearchView(account_id: Uuid, workspace_id: Uuid) -> impl IntoView {
                         placeholder=move || format!("Search {}", ws_name())
                         prop:value=move || text.get()
                         on:input=move |ev| text.set(event_target_value(&ev))
-                        on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { close() } />
+                        on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); close() } />
                     <button type="button" class="iconbtn sm" aria-label="Clear search"
                         on:click=move |_| { text.set(String::new()); results.set(Results::Idle); c.query.set(String::new()); }>
                         {sized(Icon::Close, 14)}</button>

@@ -118,7 +118,7 @@ pub fn Switcher() -> impl IntoView {
     view! {
         <div class="scrim" on:click=move |_| close()></div>
         <section class="pop switcher" role="dialog" aria-modal="true" aria-label="Switch workspace"
-            on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { close() }>
+            on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); close() }>
             <label class="find">{sized(Icon::Search, 14)}
                 <input type="text" autofocus placeholder="Find a workspace" aria-label="Find a workspace"
                     prop:value=move || find.get() on:input=move |ev| find.set(event_target_value(&ev)) /></label>

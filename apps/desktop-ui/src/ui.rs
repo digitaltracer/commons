@@ -25,8 +25,11 @@ pub enum Icon {
     Bold,
     Italic,
     Code,
+    CodeBlock,
+    Strike,
     Link,
     List,
+    NumberedList,
     Bell,
     BellOff,
     Clock,
@@ -71,10 +74,15 @@ fn path(i: Icon) -> &'static str {
         Icon::Bold => "M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z",
         Icon::Italic => "M19 4h-9M14 20H5M15 4 9 20",
         Icon::Code => "m8 7-5 5 5 5M16 7l5 5-5 5",
+        Icon::CodeBlock => "M4 4h16v16H4zM9 9l-2 3 2 3M15 9l2 3-2 3",
+        Icon::Strike => {
+            "M5 12h14M16 6.5A4 3 0 0 0 12 5c-2.5 0-4 1.3-4 3M8 17.5a4 3 0 0 0 4 1.5c2.5 0 4-1.3 4-3"
+        }
         Icon::Link => {
             "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"
         }
         Icon::List => "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
+        Icon::NumberedList => "M10 6h10M10 12h10M10 18h10M4 5h1v4M4 15h2l-2 3h2",
         Icon::Bell => "M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0",
         Icon::BellOff => "M6 16V11a6 6 0 0 1 9.5-4.9M18 11v5l2 2H8M10 20a2 2 0 0 0 4 0M3 3l18 18",
         Icon::Clock => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 7v5l3 2",
