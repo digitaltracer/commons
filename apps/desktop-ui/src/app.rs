@@ -79,9 +79,23 @@ pub fn App() -> impl IntoView {
                 }),
                 AppEvent::Error { message } => ipc::warn(message),
                 AppEvent::UpdateReady { version } => update.set(Some(version)),
-                AppEvent::Staged { .. }
-                | AppEvent::FileDrag { .. }
-                | AppEvent::FilesDropped { .. } => {}
+                AppEvent::Staged {
+                    account_id,
+                    conversation_id,
+                    thread_root_id,
+                    files,
+                } => c.staged.update(|m| {
+                    let key = (account_id, conversation_id, thread_root_id);
+                    if files.is_empty() {
+                        m.remove(&key);
+                    } else {
+                        m.insert(key, files);
+                    }
+                }),
+                AppEvent::FileDrag { active } => c.dragging.set(active),
+                AppEvent::FilesDropped { drop_id, x, y } => {
+                    crate::messages::claim_drop(c, drop_id, x, y)
+                }
             },
         )
         .await;

@@ -2,7 +2,7 @@
 use leptos::html::{Div, Textarea};
 use leptos::prelude::*;
 use proto::model::{ConversationKind, Entity, Member};
-use proto::view::{ConnectionState, SendState};
+use proto::view::{ConnectionState, SendState, StagedFile, StagedState};
 use proto::window::{Applied, MAX_WINDOW_ROWS, WindowBatch, WindowClient, WindowRow, WindowSpec};
 use serde_json::json;
 use uuid::Uuid;
@@ -1158,6 +1158,38 @@ fn keep_draft(
     });
 }
 
+/// Stages dropped files in the composer under the drop point, or else the open conversation's.
+pub fn claim_drop(c: crate::state::Ctx, drop_id: u64, x: f64, y: f64) {
+    let at = document()
+        .element_from_point(x as f32, y as f32)
+        .and_then(|e| e.closest(".comp[data-conv]").ok().flatten())
+        .and_then(|el| {
+            let id = |name: &str| {
+                el.get_attribute(name)
+                    .and_then(|v| Uuid::parse_str(&v).ok())
+            };
+            Some((id("data-account")?, id("data-conv")?, id("data-thread")))
+        });
+    let Some(key) = at.or_else(|| {
+        c.selected
+            .get_untracked()
+            .map(|s| (s.account_id, s.conversation_id, None))
+    }) else {
+        return;
+    };
+    leptos::task::spawn_local(async move {
+        let r: Result<usize, String> = ipc::invoke(
+            "stage_dropped",
+            json!({"accountId": key.0, "conversationId": key.1, "threadRootId": key.2,
+                   "dropId": drop_id}),
+        )
+        .await;
+        if let Err(e) = r {
+            c.stage_error.set(Some((key, e)));
+        }
+    });
+}
+
 /// Which autocomplete a typed sigil opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sigil {
@@ -1218,6 +1250,40 @@ pub fn Composer(
     let me = c.me(account_id).unwrap_or_default();
     let offline = move || c.connection(account_id) != ConnectionState::Online;
     let thread = thread_root_id.is_some();
+    let key = (account_id, conversation_id, thread_root_id);
+    let notice = RwSignal::new(None::<String>);
+    let staged = move || c.staged.with(|m| m.get(&key).cloned().unwrap_or_default());
+    // Files staged before this composer opened (another conversation's visit, a reload).
+    leptos::task::spawn_local(async move {
+        let args = json!({"accountId": account_id, "conversationId": conversation_id,
+                          "threadRootId": thread_root_id});
+        if let Ok(files) = ipc::invoke::<Vec<StagedFile>>("staged_files", args).await
+            && !files.is_empty()
+        {
+            c.staged.update(|m| {
+                m.entry(key).or_insert(files);
+            });
+        }
+    });
+    Effect::new(move |_| {
+        if let Some((k, e)) = c.stage_error.get()
+            && k == key
+        {
+            c.stage_error.set(None);
+            notice.set(Some(format!("Could not attach: {e}")));
+        }
+    });
+    // A notice that Send had to wait goes once nothing blocks it.
+    Effect::new(move |_| {
+        if compose::send_blocked(&staged()).is_none()
+            && notice.with_untracked(|n| {
+                n.as_deref()
+                    .is_some_and(|n| n.starts_with("Wait") || n.starts_with("Remove or retry"))
+            })
+        {
+            notice.set(None);
+        }
+    });
 
     keep_draft(
         account_id,
@@ -1395,9 +1461,15 @@ pub fn Composer(
         splice(text, area, at, caret, &insert, 0);
     };
 
+    // Text and staged files go out as one message, once every file has uploaded.
     let send = move || {
         let body = text.get_untracked();
-        if body.trim().is_empty() {
+        let files = staged();
+        if body.trim().is_empty() && files.is_empty() {
+            return;
+        }
+        if let Some(why) = compose::send_blocked(&files) {
+            notice.set(Some(why.to_string()));
             return;
         }
         let mentions = picked.with_value(|p| compose::picked_entities(&body, p));
@@ -1405,12 +1477,22 @@ pub fn Composer(
         fence.set(false);
         picked.set_value(vec![]);
         ac.set(None);
+        notice.set(None);
         c.repin.set(Some((conversation_id, thread_root_id)));
-        ipc::command(
-            "send_message",
-            json!({"accountId": account_id, "conversationId": conversation_id,
-                   "body": body, "threadRootId": thread_root_id, "mentions": mentions}),
-        );
+        leptos::task::spawn_local(async move {
+            let sent: Result<Uuid, String> = ipc::invoke(
+                "send_message",
+                json!({"accountId": account_id, "conversationId": conversation_id,
+                       "body": body, "threadRootId": thread_root_id, "mentions": mentions}),
+            )
+            .await;
+            if let Err(e) = sent {
+                notice.set(Some(e));
+                if text.with_untracked(String::is_empty) {
+                    text.set(body);
+                }
+            }
+        });
     };
 
     let list = move |marker: &'static str| {
@@ -1428,22 +1510,58 @@ pub fn Composer(
         ipc::next_frame(refresh);
     };
 
-    let attach_error = RwSignal::new(None::<String>);
-    let attaching = RwSignal::new(false);
     let attach = move |_| {
-        attach_error.set(None);
-        attaching.set(true);
+        notice.set(None);
         leptos::task::spawn_local(async move {
-            let r: Result<Option<Uuid>, String> = ipc::invoke(
-                "attach_file",
+            let r: Result<usize, String> = ipc::invoke(
+                "pick_files",
                 json!({"accountId": account_id, "conversationId": conversation_id, "threadRootId": thread_root_id}),
             )
             .await;
-            attaching.set(false);
             if let Err(e) = r {
-                attach_error.set(Some(format!("Could not attach: {e}")));
+                notice.set(Some(format!("Could not attach: {e}")));
             }
         });
+    };
+    // Pasted files (a screenshot, or files copied in Finder) are staged; pasted text,
+    // HTML included, goes into the field as plain text, as the field does on its own.
+    let paste = move |ev: web_sys::ClipboardEvent| {
+        let Some(dt) = ev.clipboard_data() else {
+            return;
+        };
+        let Some(list) = dt.files() else { return };
+        let files: Vec<web_sys::File> = (0..list.length()).filter_map(|i| list.item(i)).collect();
+        let names: Vec<String> = files.iter().map(web_sys::File::name).collect();
+        let pasted_text = dt.get_data("text/plain").unwrap_or_default();
+        if !compose::paste_stages_files(&pasted_text, &names) {
+            return;
+        }
+        ev.prevent_default();
+        notice.set(None);
+        for f in files {
+            leptos::task::spawn_local(async move {
+                let staged = async {
+                    let buf = wasm_bindgen_futures::JsFuture::from(f.array_buffer())
+                        .await
+                        .map_err(|_| "could not read the pasted file".to_string())?;
+                    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                    let name = String::from(js_sys::encode_uri_component(&f.name()));
+                    let headers = [
+                        ("x-account", account_id.to_string()),
+                        ("x-conversation", conversation_id.to_string()),
+                        (
+                            "x-thread",
+                            thread_root_id.map(|t| t.to_string()).unwrap_or_default(),
+                        ),
+                        ("x-name", name),
+                    ];
+                    ipc::invoke_bytes::<Uuid>("stage_pasted", &bytes, &headers).await
+                };
+                if let Err(e) = staged.await {
+                    notice.set(Some(format!("Could not attach: {e}")));
+                }
+            });
+        }
     };
     let rows =
         move || text.with(|t| t.lines().count().clamp(1, 8) + usize::from(t.ends_with('\n')));
@@ -1457,8 +1575,44 @@ pub fn Composer(
         }
     };
 
+    let chip = move |f: StagedFile| {
+        let id = f.id;
+        let name = f.name.clone();
+        let failed = matches!(f.state, StagedState::Failed { .. });
+        let uploading = matches!(f.state, StagedState::Uploading);
+        let pct = (f.sent * 100).checked_div(f.size).unwrap_or(0);
+        let status = compose::chip_status(&f, |n| ui::size(n as i64));
+        let args = move || {
+            json!({"accountId": account_id, "conversationId": conversation_id,
+                                  "threadRootId": thread_root_id, "id": id})
+        };
+        view! {
+            <li class="fchip" class:failed=failed aria-busy=uploading.to_string()>
+                <span class="fic">{icon(Icon::File)}</span>
+                <span class="fmeta">
+                    <span class="fn" title=name.clone()>{name.clone()}</span>
+                    <span class="fs" role=failed.then_some("alert")>{status}</span>
+                </span>
+                {failed.then(|| view! {
+                    <button type="button" class="iconbtn sm" aria-label=format!("Retry {name}") title="Retry"
+                        on:click=move |_| ipc::command("retry_staged", args())>{sized(Icon::Refresh, 14)}</button>
+                })}
+                <button type="button" class="iconbtn sm" aria-label=format!("Remove {}", f.name) title="Remove"
+                    on:click=move |_| ipc::command("remove_staged", args())>{sized(Icon::Close, 14)}</button>
+                {uploading.then(|| view! { <span class="bar" style=format!("width: {pct}%")></span> })}
+            </li>
+        }
+    };
+
     view! {
-        <div class="comp">
+        <div class="comp" class:dropping=move || c.dragging.get()
+            data-account=account_id.to_string() data-conv=conversation_id.to_string()
+            data-thread=thread_root_id.map(|t| t.to_string()).unwrap_or_default()>
+            <Show when=move || !staged().is_empty()>
+                <ul class="chips" aria-label="Files to send">
+                    {move || staged().into_iter().map(chip).collect_view()}
+                </ul>
+            </Show>
             <div class="cwrap">
                 <div class="hlayer" aria-hidden="true" node_ref=hl>
                     <div class="hcbox" node_ref=boxes></div>
@@ -1475,6 +1629,7 @@ pub fn Composer(
                     aria-controls=list_id.get_value()
                     aria-activedescendant=move || ac_open().then(|| format!("{}-{}", list_id.get_value(), ac_index.get()))
                     on:scroll=move |_| layer::sync(area, hl)
+                    on:paste=paste
                     on:blur=move |_| ac.set(None)
                     on:input=move |ev| {
                         text.set(event_target_value(&ev));
@@ -1575,8 +1730,7 @@ pub fn Composer(
                     <button type="button" class="iconbtn" aria-label="Numbered list" title="Numbered list" on:click=move |_| list("1. ")>{icon(Icon::NumberedList)}</button>
                 </span>
                 <span class="vsep"></span>
-                <button type="button" class="iconbtn" on:click=attach aria-label="Attach a file" title="Attach a file"
-                    disabled=move || attaching.get() || offline()>{icon(Icon::Attach)}</button>
+                <button type="button" class="iconbtn" on:click=attach aria-label="Attach files" title="Attach files">{icon(Icon::Attach)}</button>
                 <button type="button" class="iconbtn" aria-label="Mention someone" title="Mention someone" on:click=move |_| {
                     let t = text.get_untracked();
                     let (s, e) = selection(&t, area);
@@ -1597,8 +1751,11 @@ pub fn Composer(
                             on_close=Callback::new(move |_| emoji.set(false)) />
                     </Show>
                 </span>
-                {move || attaching.get().then(|| view! { <span class="hint">"Uploading…"</span> })}
-                <span class="hint">{move || if c.connection(account_id) == ConnectionState::SignedOut {
+                <span class="hint">{move || if c.dragging.get() {
+                        view! { "Drop to attach" }.into_any()
+                    } else if staged().iter().any(|f| matches!(f.state, StagedState::Uploading)) {
+                        view! { "Uploading · Send when it's done" }.into_any()
+                    } else if c.connection(account_id) == ConnectionState::SignedOut {
                         view! { "Signed out · messages wait in your outbox" }.into_any()
                     } else if offline() {
                         view! { "Offline · messages wait in your outbox" }.into_any()
@@ -1617,7 +1774,7 @@ pub fn Composer(
                     on:click=move |_| send()>{icon(Icon::Send)}</button>
             </div>
         </div>
-        {move || attach_error.get().map(|e| view! { <p class="error attach-error" role="alert">{e}</p> })}
+        {move || notice.get().map(|e| view! { <p class="error attach-error" role="alert">{e}</p> })}
     }
 }
 

@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use leptos::prelude::*;
 use proto::model::{ConversationKind, Role};
 use proto::view::{
-    AccountView, ConnectionState, ConversationView, DraftView, MessageView, SidebarView, UiPrefs,
-    WorkspaceView,
+    AccountView, ConnectionState, ConversationView, DraftView, MessageView, SidebarView,
+    StagedFile, UiPrefs, WorkspaceView,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -123,7 +123,17 @@ pub struct Ctx {
     pub last: StoredValue<HashMap<Uuid, Uuid>>,
     /// Conversations opened this session, newest first.
     pub recent: StoredValue<Vec<Selection>>,
+    /// Files waiting in each composer, by account, conversation and thread, as the core
+    /// reports them.
+    pub staged: RwSignal<HashMap<ComposerKey, Vec<StagedFile>>>,
+    /// Files are being dragged over the window.
+    pub dragging: RwSignal<bool>,
+    /// A problem staging dropped files, for the composer that took them.
+    pub stage_error: RwSignal<Option<(ComposerKey, String)>>,
 }
+
+/// A composer: account, conversation, and the thread root it replies in.
+pub type ComposerKey = (Uuid, Uuid, Option<Uuid>);
 
 pub fn ctx() -> Ctx {
     expect_context::<Ctx>()
@@ -165,6 +175,9 @@ impl Ctx {
             invite_link: RwSignal::new(None),
             last: StoredValue::new(HashMap::new()),
             recent: StoredValue::new(vec![]),
+            staged: RwSignal::new(HashMap::new()),
+            dragging: RwSignal::new(false),
+            stage_error: RwSignal::new(None),
         }
     }
 

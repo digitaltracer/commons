@@ -277,6 +277,18 @@ a { color: var(--accent); }
 /* Narrow composers (threads) keep the inline marks and drop the block tools. */
 @container (max-width: 470px) { .cgroup2 { display: none; } }
 @container (max-width: 380px) { .cgroup { display: none; } .cgroup + .vsep { display: none; } }
+.comp.dropping { border-color: var(--accent); border-style: dashed; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 10px 12px 0; list-style: none; }
+.fchip { position: relative; display: flex; align-items: center; gap: 8px; width: 196px; height: 44px; padding: 0 4px 0 8px; border: 1px solid var(--line2); border-radius: 8px; background: var(--card); overflow: hidden; }
+.fchip.failed { border-color: var(--danger); }
+.fic { width: 28px; height: 28px; border-radius: 6px; background: var(--chip); color: var(--text2); display: flex; align-items: center; justify-content: center; flex: none; }
+.fmeta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.fn { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fs { font-size: 11px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fchip.failed .fs { color: var(--danger); }
+.fchip .bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); transition: width .2s; }
+@media (prefers-reduced-motion: reduce) { .fchip .bar { transition: none; } }
+.iconbtn.sm { width: 22px; height: 22px; }
 .cwrap { position: relative; }
 /* The textarea and its highlight layer share every metric. Kerning and ligatures are off in
    both, so a style boundary in the layer can't shift a glyph; the layer adds colour only. */

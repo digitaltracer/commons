@@ -3,6 +3,7 @@ use std::ops::Range;
 
 use proto::markdown::Style;
 use proto::model::Entity;
+use proto::view::{StagedFile, StagedState};
 use uuid::Uuid;
 
 /// Whether the caret, after `before`, sits inside a ``` or ~~~ fence that isn't closed yet.
@@ -197,6 +198,48 @@ pub fn picked_entities(body: &str, picked: &[(Pick, String)]) -> Vec<Entity> {
         | Entity::Emoji { start, .. } => *start,
     });
     out
+}
+
+/// Why Send must wait, if it must: a staged file is still uploading or didn't upload. The
+/// core refuses the same cases.
+pub fn send_blocked(files: &[StagedFile]) -> Option<&'static str> {
+    if files
+        .iter()
+        .any(|f| matches!(f.state, StagedState::Uploading))
+    {
+        Some("Wait for the files to finish uploading")
+    } else if files
+        .iter()
+        .any(|f| matches!(f.state, StagedState::Failed { .. }))
+    {
+        Some("Remove or retry the file that didn't upload")
+    } else {
+        None
+    }
+}
+
+/// Whether a paste carrying files should stage them rather than paste its text. Finder puts
+/// the files' names in the text; anything else (a rich copy with a rendered image) pastes as
+/// text.
+pub fn paste_stages_files(text: &str, names: &[String]) -> bool {
+    !names.is_empty()
+        && text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .all(|l| names.iter().any(|n| n == l))
+}
+
+/// The second line of a file chip.
+pub fn chip_status(f: &StagedFile, size: impl Fn(u64) -> String) -> String {
+    match &f.state {
+        StagedState::Uploading => {
+            let pct = (f.sent * 100).checked_div(f.size).unwrap_or(0).min(99);
+            format!("Uploading · {pct}%")
+        }
+        StagedState::Ready { .. } => size(f.size),
+        StagedState::Failed { error } => error.clone(),
+    }
 }
 
 /// One stretch of the highlight layer: a byte range and the styles on it, as bits.
@@ -395,6 +438,64 @@ mod tests {
             "#dev-ops is another channel's name"
         );
         assert!(picked_entities("Ann and dev", &picked).is_empty());
+    }
+
+    fn file(state: StagedState, sent: u64) -> StagedFile {
+        StagedFile {
+            id: Uuid::nil(),
+            name: "a.png".into(),
+            size: 200,
+            sent,
+            state,
+        }
+    }
+
+    #[test]
+    fn staged_files_and_sending() {
+        let ready = file(
+            StagedState::Ready {
+                file_id: Uuid::nil(),
+            },
+            200,
+        );
+        let up = file(StagedState::Uploading, 124);
+        let bad = file(
+            StagedState::Failed {
+                error: "too big".into(),
+            },
+            0,
+        );
+        assert_eq!(send_blocked(&[]), None);
+        assert_eq!(send_blocked(std::slice::from_ref(&ready)), None);
+        assert!(
+            send_blocked(&[ready.clone(), up.clone()])
+                .unwrap()
+                .contains("uploading")
+        );
+        assert!(
+            send_blocked(&[ready.clone(), bad.clone()])
+                .unwrap()
+                .contains("retry")
+        );
+        let size = |n: u64| format!("{n} B");
+        assert_eq!(chip_status(&up, size), "Uploading · 62%");
+        assert_eq!(chip_status(&ready, size), "200 B");
+        assert_eq!(chip_status(&bad, size), "too big");
+    }
+
+    #[test]
+    fn pastes_with_files() {
+        let names = vec!["a.png".to_string(), "b.pdf".to_string()];
+        assert!(paste_stages_files("", &names), "a screenshot has no text");
+        assert!(
+            paste_stages_files("a.png\nb.pdf", &names),
+            "Finder names the files"
+        );
+        assert!(
+            !paste_stages_files("Quarterly numbers", &names),
+            "a rich copy pastes its text"
+        );
+        assert!(!paste_stages_files("", &[]));
     }
 
     #[test]

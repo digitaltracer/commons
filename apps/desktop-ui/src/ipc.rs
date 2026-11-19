@@ -8,6 +8,13 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
     async fn tauri_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
+    async fn tauri_invoke_with(
+        cmd: &str,
+        args: JsValue,
+        options: JsValue,
+    ) -> Result<JsValue, JsValue>;
+
     /// A Tauri channel: the core streams batches to `onmessage`.
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"])]
     pub type Channel;
@@ -33,6 +40,26 @@ fn error_text(e: JsValue) -> String {
 /// Invokes a core command with named arguments.
 pub async fn invoke<T: DeserializeOwned>(cmd: &str, args: serde_json::Value) -> Result<T, String> {
     let v = tauri_invoke(cmd, to_js(&args)).await.map_err(error_text)?;
+    serde_wasm_bindgen::from_value(v).map_err(|e| e.to_string())
+}
+
+/// Invokes a command whose body is raw bytes, with its other arguments in headers.
+pub async fn invoke_bytes<T: DeserializeOwned>(
+    cmd: &str,
+    bytes: &[u8],
+    headers: &[(&str, String)],
+) -> Result<T, String> {
+    let h = js_sys::Object::new();
+    for (k, v) in headers {
+        js_sys::Reflect::set(&h, &JsValue::from_str(k), &JsValue::from_str(v))
+            .map_err(error_text)?;
+    }
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &JsValue::from_str("headers"), &h).map_err(error_text)?;
+    let body = js_sys::Uint8Array::from(bytes);
+    let v = tauri_invoke_with(cmd, body.into(), options.into())
+        .await
+        .map_err(error_text)?;
     serde_wasm_bindgen::from_value(v).map_err(|e| e.to_string())
 }
 

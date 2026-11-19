@@ -1,7 +1,7 @@
 //! Tauri commands: the UI's only way to reach the core.
 use client_core::transport::Method;
 use proto::model::{Conversation, ConversationKind, Entity, Member, Preferences};
-use proto::view::{AppEvent, SidebarView};
+use proto::view::{AppEvent, SidebarView, StagedFile};
 use proto::window::{WindowBatch, WindowSpec};
 use tauri::State;
 use tauri::ipc::Channel;
@@ -28,7 +28,12 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         move_window,
         unsubscribe_window,
         send_message,
-        attach_file,
+        staged_files,
+        pick_files,
+        stage_pasted,
+        stage_dropped,
+        retry_staged,
+        remove_staged,
         edit_message,
         delete_message,
         toggle_reaction,
@@ -214,6 +219,8 @@ fn unsubscribe_window(host: State<'_, Host>, account_id: Uuid, sub_id: u64) -> R
     Ok(())
 }
 
+/// Sends the composer's text with every file staged in it. `thread_root_id` is the composer's
+/// key as the UI has it; the message goes to its resolved root.
 #[tauri::command]
 fn send_message(
     host: State<'_, Host>,
@@ -224,53 +231,168 @@ fn send_message(
     mentions: Option<Vec<Entity>>,
 ) -> R<Uuid> {
     let a = host.core.account(account_id).map_err(err)?;
-    let thread_root_id = resolve_root(&a, thread_root_id)?;
-    a.send_message_with(
-        conversation_id,
+    let root = resolve_root(&a, thread_root_id)?;
+    a.send_with_staged(
+        (conversation_id, thread_root_id),
         body,
-        thread_root_id,
-        vec![],
+        root,
         mentions.unwrap_or_default(),
     )
     .map_err(err)
 }
 
-/// Picks a file, uploads it and queues a message carrying it. `None` when the picker was
-/// cancelled.
 #[tauri::command]
-async fn attach_file(
+fn staged_files(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+) -> R<Vec<StagedFile>> {
+    Ok(host
+        .core
+        .account(account_id)
+        .map_err(err)?
+        .staged((conversation_id, thread_root_id)))
+}
+
+/// Picks files with the native dialog and stages them in the composer. Their paths never
+/// reach the webview. Returns how many were staged.
+#[tauri::command]
+async fn pick_files(
     app: tauri::AppHandle,
     host: State<'_, Host>,
     account_id: Uuid,
     conversation_id: Uuid,
     thread_root_id: Option<Uuid>,
-) -> R<Option<Uuid>> {
+) -> R<usize> {
     use tauri_plugin_dialog::DialogExt;
     let a = host.core.account(account_id).map_err(err)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_title("Attach a file")
-        .pick_file(move |picked| {
+        .set_title("Attach files")
+        .pick_files(move |picked| {
             let _ = tx.send(picked);
         });
-    let Some(picked) = rx.await.map_err(err)? else {
-        return Ok(None);
+    let picked = rx.await.map_err(err)?.unwrap_or_default();
+    stage_paths(
+        &a,
+        (conversation_id, thread_root_id),
+        picked.into_iter().filter_map(|p| p.into_path().ok()),
+    )
+}
+
+fn stage_paths(
+    a: &client_core::Account,
+    key: client_core::account::DraftKey,
+    paths: impl IntoIterator<Item = std::path::PathBuf>,
+) -> R<usize> {
+    let mut n = 0;
+    for p in paths {
+        a.stage_file(key, &p).map_err(err)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Stages files dropped on the window, claimed by the id the drop event carried.
+#[tauri::command]
+async fn stage_dropped(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    drop_id: u64,
+) -> R<usize> {
+    let a = host.core.account(account_id).map_err(err)?;
+    let paths = host
+        .take_drop(drop_id)
+        .ok_or_else(|| "those files are no longer available".to_string())?;
+    stage_paths(&a, (conversation_id, thread_root_id), paths)
+}
+
+/// Stages pasted file bytes. The body is the raw bytes; the composer and the file's name come
+/// in headers, the name percent-encoded.
+#[tauri::command]
+async fn stage_pasted(host: State<'_, Host>, request: tauri::ipc::Request<'_>) -> R<Uuid> {
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
     };
-    let path = picked.into_path().map_err(err)?;
-    let thread_root_id = resolve_root(&a, thread_root_id)?;
-    a.attach_file(conversation_id, thread_root_id, &path)
-        .await
-        .map(Some)
-        .map_err(|e| match e {
-            client_core::account::SyncError::Transport(
-                client_core::transport::TransportError::Status { body, .. },
-            ) => body["message"]
-                .as_str()
-                .unwrap_or("the upload was refused")
-                .to_string(),
-            other => other.to_string(),
-        })
+    let id = |name: &str| -> R<Option<Uuid>> {
+        header(name)
+            .filter(|v| !v.is_empty())
+            .map(|v| Uuid::parse_str(&v).map_err(err))
+            .transpose()
+    };
+    let account_id = id("x-account")?.ok_or("no account")?;
+    let conversation_id = id("x-conversation")?.ok_or("no conversation")?;
+    let thread_root_id = id("x-thread")?;
+    let name = percent_decode(&header("x-name").unwrap_or_default());
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected the file's bytes".into());
+    };
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .stage_bytes((conversation_id, thread_root_id), &name, bytes)
+        .map_err(err)
+}
+
+/// Decodes `%XX` escapes as UTF-8; anything malformed stays as it is.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                b.get(i + 1).copied().and_then(hex),
+                b.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[tauri::command]
+async fn retry_staged(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    id: Uuid,
+) -> R<()> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .retry_staged((conversation_id, thread_root_id), id);
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_staged(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    id: Uuid,
+) -> R<()> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .remove_staged((conversation_id, thread_root_id), id);
+    Ok(())
 }
 
 /// Asks where to save an attachment, then fetches it through the core, which checks access.
@@ -884,4 +1006,19 @@ async fn revoke_invite(
         .await
         .map_err(refusal)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn pasted_names_decode() {
+        assert_eq!(
+            percent_decode("Screen%20Shot%20%E2%9C%93.png"),
+            "Screen Shot ✓.png"
+        );
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("a%zzb"), "a%zzb");
+    }
 }

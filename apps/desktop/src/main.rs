@@ -7,6 +7,8 @@ mod files;
 mod spike;
 mod updater;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use client_core::Core;
@@ -21,6 +23,67 @@ pub struct Host {
     pub core: Arc<Core>,
     pub app_channels: Arc<Mutex<Vec<Channel<AppEvent>>>>,
     pub spike: Option<spike::Spike>,
+    /// Paths of files dropped on the window, until the UI says which composer takes them.
+    pub drops: Mutex<Drops>,
+}
+
+#[derive(Default)]
+pub struct Drops {
+    next: u64,
+    paths: HashMap<u64, Vec<PathBuf>>,
+}
+
+/// Drops the UI hasn't claimed yet; older ones are forgotten.
+const KEPT_DROPS: usize = 8;
+
+impl Host {
+    fn broadcast(&self, ev: AppEvent) {
+        if let Ok(mut chans) = self.app_channels.lock() {
+            chans.retain(|c| c.send(ev.clone()).is_ok());
+        }
+    }
+
+    fn keep_drop(&self, paths: Vec<PathBuf>) -> Option<u64> {
+        let mut d = self.drops.lock().ok()?;
+        d.next += 1;
+        let id = d.next;
+        d.paths.insert(id, paths);
+        d.paths.retain(|k, _| *k + KEPT_DROPS as u64 > id);
+        Some(id)
+    }
+
+    pub fn take_drop(&self, id: u64) -> Option<Vec<PathBuf>> {
+        self.drops.lock().ok()?.paths.remove(&id)
+    }
+}
+
+/// Native file drops. Tauri handles them, so the webview's own drop events carry no files;
+/// the UI hears where the files landed and claims them by id, and never sees their paths.
+fn on_drag(window: &tauri::Window, event: &tauri::DragDropEvent) {
+    let Some(host) = window.app_handle().try_state::<Host>() else {
+        return;
+    };
+    match event {
+        tauri::DragDropEvent::Enter { paths, .. } if !paths.is_empty() => {
+            host.broadcast(AppEvent::FileDrag { active: true });
+        }
+        tauri::DragDropEvent::Leave => host.broadcast(AppEvent::FileDrag { active: false }),
+        tauri::DragDropEvent::Drop { paths, position } => {
+            host.broadcast(AppEvent::FileDrag { active: false });
+            if paths.is_empty() {
+                return;
+            }
+            let scale = window.scale_factor().unwrap_or(1.0);
+            if let Some(drop_id) = host.keep_drop(paths.clone()) {
+                host.broadcast(AppEvent::FilesDropped {
+                    drop_id,
+                    x: position.x / scale,
+                    y: position.y / scale,
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 /// OS notifications. macOS applies the user's Focus (do-not-disturb) setting to them.
@@ -107,10 +170,10 @@ fn main() {
                 .with_state_flags(WINDOW_STATE)
                 .build(),
         )
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Resized(size) = event {
-                keep_minimum(window, *size);
-            }
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Resized(size) => keep_minimum(window, *size),
+            tauri::WindowEvent::DragDrop(drag) => on_drag(window, drag),
+            _ => {}
         })
         .register_asynchronous_uri_scheme_protocol(files::SCHEME, |ctx, request, responder| {
             let Some(host) = ctx.app_handle().try_state::<Host>() else {
@@ -164,6 +227,7 @@ fn main() {
                 core,
                 app_channels: channels,
                 spike,
+                drops: Mutex::default(),
             });
             updater::start(app.handle(), !spike_mode)?;
             Ok(())
