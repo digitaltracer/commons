@@ -462,7 +462,7 @@ mark { background: var(--mark); color: var(--marktext); border-radius: 3px; padd
 .signinwin .tb { width: 100%; }
 .signform { display: flex; flex-direction: column; gap: 14px; width: 400px; margin: 6vh 0 40px; padding: 28px 28px 24px; background: var(--card); color: var(--text); border-radius: 14px; border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.08); }
 .signform .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
-.signform .logo { width: 36px; height: 36px; border-radius: 9px; background: var(--accent); color: var(--onaccent); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 17px; }
+.signform .logo { width: 36px; height: 36px; flex: none; }
 .signform h1 { margin: 0; font-size: 19px; }
 .signform .lede { margin: -6px 0 4px; color: var(--text2); font-size: 13px; }
 .signform .chk { font-size: 13px; }

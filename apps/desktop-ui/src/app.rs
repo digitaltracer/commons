@@ -953,7 +953,7 @@ fn SignIn() -> impl IntoView {
         <div class="win signinwin">
             <div class="tb" data-tauri-drag-region></div>
             <form class="signform card" on:submit=submit>
-                <div class="brand"><span class="logo" aria-hidden="true">"C"</span>
+                <div class="brand"><img class="logo" src="logo.png" alt="" />
                     <h1>{move || if register.get() { "Create a Commons account" } else { "Sign in to Commons" }}</h1></div>
                 <p class="lede">"Use the address of your community's Commons server, or paste an invite link."</p>
                 <label class="flabel">"Invite link (optional)" <input class="field" placeholder="https://…/invite#…"
