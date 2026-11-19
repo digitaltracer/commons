@@ -4,13 +4,15 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Developer tasks: `cargo xtask dev | check-deps | spike | openapi`."
+description = "Developer tasks: `cargo xtask dev | app | check-deps | spike | openapi | release`."
 
 [dependencies]
 server.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 utoipa = "6"
+minisign-verify = "0.3.0"
+base64 = "0.23.1"
 
 [lints]
 workspace = true

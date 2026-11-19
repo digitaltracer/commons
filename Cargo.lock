@@ -8863,6 +8863,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
+ "minisign-verify",
  "serde_json",
  "server",
  "utoipa",

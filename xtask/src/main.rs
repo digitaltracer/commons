@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+mod release;
+
 /// Crates the UI must never link, directly or transitively (decision 2).
 const UI_FORBIDDEN: &[&str] = &[
     "client-core",
@@ -37,13 +39,15 @@ fn main() -> Result<()> {
         Some("check-deps") => check_deps(),
         Some("spike") => spike(),
         Some("openapi") => openapi(),
+        Some("release") => release::release(&args[1..]),
         _ => {
-            eprintln!("usage: cargo xtask <dev | app | check-deps | spike | openapi>");
+            eprintln!("usage: cargo xtask <dev | app | check-deps | spike | openapi | release>");
             eprintln!("  dev         start Postgres in Docker, run commonsd and the desktop app");
             eprintln!("  app         build the desktop app once and run it (no file watcher)");
             eprintln!("  check-deps  fail if the UI crate links storage or network crates");
             eprintln!("  spike       build the app and measure the M0 webview spike");
             eprintln!("  openapi     write docs/api/openapi.json");
+            eprintln!("  release     build the signed, notarized Mac app, dmg and update files");
             std::process::exit(2);
         }
     }
