@@ -935,11 +935,33 @@ fn LongBody(src: String, entities: Vec<Entity>, reader: Reader, edited: bool) ->
     let el: NodeRef<Div> = NodeRef::new();
     let overflows = RwSignal::new(false);
     let open = RwSignal::new(false);
+    let watch = StoredValue::new_local(None::<ipc::SizeWatch>);
+    // Open, the body isn't clamped and can't be measured; Show less stays.
+    let measure = move || {
+        if let Some(d) = el.try_get_untracked().flatten()
+            && open.try_get_untracked() == Some(false)
+        {
+            let over = d.scroll_height() > d.client_height() + 2;
+            if overflows.try_get_untracked() != Some(over) {
+                overflows.try_set(over);
+            }
+        }
+    };
     Effect::new(move |_| {
-        if let Some(d) = el.get() {
-            ipc::next_frame(move || overflows.set(d.scroll_height() > d.client_height() + 2));
+        if el.get().is_some() {
+            ipc::next_frame(move || {
+                measure();
+                // A narrower column wraps a long enough body past the clamp: measure again.
+                if let Some(d) = el.try_get_untracked().flatten()
+                    && may_clamp_when_narrower(d.scroll_height() as f64)
+                    && watch.try_with_value(|w| w.is_none()) == Some(true)
+                {
+                    watch.set_value(Some(ipc::watch_size(&d, measure)));
+                }
+            });
         }
     });
+    on_cleanup(move || drop(watch.try_update_value(|w| w.take())));
     view! {
         <div class="body" class:clamp=move || !open.get() class:faded=move || overflows.get() && !open.get()
             node_ref=el>{markdown::body(&src, &entities, reader, edited)}</div>
@@ -950,6 +972,16 @@ fn LongBody(src: String, entities: Vec<Entity>, reader: Reader, edited: bool) ->
             </button>
         })}
     }
+}
+
+/// The height of `.body.clamp` in style.css: 18em at 14.5px, twelve lines.
+const CLAMP_PX: f64 = 18.0 * 14.5;
+
+/// Whether a body this tall could pass the clamp once its column narrows. Below three
+/// lines it would need a column a quarter as wide, narrower than the window allows, so
+/// short messages, most of a list, are never watched.
+fn may_clamp_when_narrower(content_px: f64) -> bool {
+    content_px * 4.0 >= CLAMP_PX
 }
 
 /// Asks before deleting a message, in a small popover at the trash button.

@@ -145,3 +145,23 @@ pub fn on_resize(targets: &[&web_sys::Element], f: impl FnMut() + 'static) -> Re
     }
     ro
 }
+
+/// A size watch on one element that stops, and frees its callback, when dropped.
+pub struct SizeWatch {
+    ro: ResizeObserver,
+    _cb: Closure<dyn FnMut()>,
+}
+
+impl Drop for SizeWatch {
+    fn drop(&mut self) {
+        self.ro.disconnect();
+    }
+}
+
+/// Calls `f` whenever `target` changes size, while the returned watch lives.
+pub fn watch_size(target: &web_sys::Element, f: impl FnMut() + 'static) -> SizeWatch {
+    let cb = Closure::<dyn FnMut()>::new(f);
+    let ro = ResizeObserver::new(cb.as_ref().unchecked_ref());
+    ro.observe(target);
+    SizeWatch { ro, _cb: cb }
+}
