@@ -57,6 +57,7 @@ services:
       COMMONS_OIDC_CLIENT_ID: ${COMMONS_OIDC_CLIENT_ID:-}
       COMMONS_OIDC_CLIENT_SECRET: ${COMMONS_OIDC_CLIENT_SECRET:-}
       COMMONS_OIDC_NAME: ${COMMONS_OIDC_NAME:-}
+      COMMONS_APP_DOWNLOAD_URL: ${COMMONS_APP_DOWNLOAD_URL:-}
       # nginx's connections through the published port arrive from the edge gateway.
       COMMONS_TRUSTED_PROXIES: ${COMMONS_TRUSTED_PROXIES:-172.30.90.1}
       RUST_LOG: ${RUST_LOG:-info}

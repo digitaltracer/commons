@@ -223,9 +223,62 @@ pub fn split_invite(pasted: &str) -> (Option<String>, String) {
     }
 }
 
+/// Whether `s` has the shape of an invite token: `<invite id as 32 hex>.<43-char secret>`.
+pub fn is_invite_token(s: &str) -> bool {
+    let Some((id, secret)) = s.split_once('.') else {
+        return false;
+    };
+    id.len() == 32
+        && id.bytes().all(|b| b.is_ascii_hexdigit())
+        && secret.len() == 43
+        && secret
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Asks what an invite is for, before anyone signs in. The token is in the body so it stays
+/// out of request lines and access logs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct InvitePreviewRequest {
+    pub token: String,
+}
+
+/// What a valid invite offers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct InvitePreview {
+    pub workspace_name: String,
+    pub inviter_name: String,
+    pub role: Role,
+    pub expires_at_ms: i64,
+    /// The invited address with most of its local part hidden, such as `ad•••@gmail.com`.
+    pub email_masked: String,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::split_invite;
+    use super::{is_invite_token, split_invite};
+
+    #[test]
+    fn invite_token_shape() {
+        let secret = "A".repeat(43);
+        let id = "0192f0c1a2b34c5d8e9f0a1b2c3d4e5f";
+        assert!(is_invite_token(&format!("{id}.{secret}")));
+        assert!(is_invite_token(&format!("{id}.{}-_9", "x".repeat(40))));
+        for bad in [
+            String::new(),
+            format!("{id}{secret}"),
+            format!("{id}.{}", "A".repeat(42)),
+            format!("{id}.{secret}A"),
+            format!("{id}.{}=", "A".repeat(42)),
+            format!("{}.{secret}", &id[1..]),
+            format!("{}g.{secret}", &id[1..]),
+            format!("{id}.{secret}.x"),
+        ] {
+            assert!(!is_invite_token(&bad), "{bad}");
+        }
+    }
 
     #[test]
     fn invite_links_old_links_and_bare_tokens() {

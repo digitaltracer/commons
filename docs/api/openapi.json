@@ -625,6 +625,47 @@
         }
       }
     },
+    "/v1/invites/preview": {
+      "post": {
+        "tags": [
+          "crate::invites"
+        ],
+        "summary": "What an invite is for, before anyone signs in: read-only, and without the locks an\naccept takes. Every kind of refusal looks the same.",
+        "operationId": "preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitePreview"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "the invite is invalid, expired, used or revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {}
+        }
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -1802,6 +1843,48 @@
             "items": {
               "$ref": "#/components/schemas/Invite"
             }
+          }
+        }
+      },
+      "InvitePreview": {
+        "type": "object",
+        "description": "What a valid invite offers.",
+        "required": [
+          "workspace_name",
+          "inviter_name",
+          "role",
+          "expires_at_ms",
+          "email_masked"
+        ],
+        "properties": {
+          "email_masked": {
+            "type": "string",
+            "description": "The invited address with most of its local part hidden, such as `ad•••@gmail.com`."
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inviter_name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "workspace_name": {
+            "type": "string"
+          }
+        }
+      },
+      "InvitePreviewRequest": {
+        "type": "object",
+        "description": "Asks what an invite is for, before anyone signs in. The token is in the body so it stays\nout of request lines and access logs.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
           }
         }
       },

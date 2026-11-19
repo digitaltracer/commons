@@ -33,6 +33,7 @@ use utoipa::OpenApi;
         crate::invites::list,
         crate::invites::revoke,
         crate::invites::accept,
+        crate::invites::preview,
         crate::conversations::list_mine,
         crate::conversations::create_channel,
         crate::conversations::browse,

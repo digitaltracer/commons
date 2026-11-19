@@ -328,14 +328,165 @@ async fn an_existing_user_accepts_an_invite() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_invite_link_opened_in_a_browser_explains_itself() {
-    let srv = server::testing::spawn(|_| {}).await;
-    // The token rides in the fragment, which the browser keeps to itself.
-    let resp = reqwest::get(format!("{}/invite", srv.base_url))
+async fn an_invite_link_opened_in_a_browser_offers_the_app() {
+    let srv = server::testing::spawn(|c| {
+        c.app_download_url = "https://dl.example.org/commons?a=1&b=<2>".into();
+    })
+    .await;
+    // The token rides in the fragment, which the browser keeps to itself; the older links
+    // carry it in the path.
+    for path in ["/invite", "/invite/abc.def"] {
+        let resp = reqwest::get(format!("{}{path}", srv.base_url))
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{path}");
+        let h = |k: &str| resp.headers()[k].to_str().unwrap().to_string();
+        assert_eq!(h("cache-control"), "no-store");
+        assert_eq!(h("referrer-policy"), "no-referrer");
+        let csp = h("content-security-policy");
+        let page = resp.text().await.unwrap();
+        assert!(page.contains("Open in Commons"));
+        assert!(page.contains("Download for Mac"));
+        assert!(page.contains(r#"href="https://dl.example.org/commons?a=1&amp;b=&lt;2&gt;""#));
+        assert!(
+            page.contains("Commons app"),
+            "the paste-it-yourself fallback stays"
+        );
+        assert!(page.contains("commons://invite?server="));
+        // The CSP allows exactly the inline script on the page.
+        let script = page
+            .split_once("<script>")
+            .and_then(|(_, r)| r.split_once("</script>"))
+            .unwrap()
+            .0;
+        use base64::Engine;
+        use sha2::Digest;
+        let hash = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(script));
+        assert!(
+            csp.contains(&format!("script-src 'sha256-{hash}'")),
+            "{csp}"
+        );
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+    }
+}
+
+async fn preview(srv: &TestServer, token: &str) -> (u16, serde_json::Value) {
+    call(
+        srv,
+        Method::POST,
+        None,
+        "/invites/preview",
+        Some(serde_json::json!({ "token": token })),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preview_shows_the_invite_without_using_it() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "Olive").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let inv = invite(&srv, &owner, w.id, "guest", "adarsh@gmail.com").await;
+    let (s, v) = preview(&srv, &inv.token).await;
+    assert_eq!(s, 200, "{v}");
+    let p: proto::api::InvitePreview = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        p,
+        proto::api::InvitePreview {
+            workspace_name: "W".into(),
+            inviter_name: "Olive".into(),
+            role: proto::model::Role::Guest,
+            expires_at_ms: inv.invite.expires_at_ms,
+            email_masked: "ad\u{2022}\u{2022}\u{2022}@gmail.com".into(),
+        }
+    );
+    // Previewing twice changes nothing, and the invite still registers its account.
+    assert_eq!(preview(&srv, &inv.token).await.0, 200);
+    let used: bool =
+        server::sqlx::query_scalar("SELECT used_at IS NOT NULL FROM invites WHERE id = $1")
+            .bind(inv.invite.id)
+            .fetch_one(srv.pool())
+            .await
+            .unwrap();
+    assert!(!used);
+    let (s, v) = try_register(&srv, "adarsh@gmail.com", Some(&inv.token)).await;
+    assert_eq!(s, 200, "{v}");
+    // Used now: the preview refuses it.
+    assert_eq!(preview(&srv, &inv.token).await.0, 403);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_refused_preview_looks_the_same() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let used = invite(&srv, &owner, w.id, "member", "used@example.org").await;
+    assert_eq!(
+        try_register(&srv, "used@example.org", Some(&used.token))
+            .await
+            .0,
+        200
+    );
+    let expired = invite(&srv, &owner, w.id, "member", "late@example.org").await;
+    server::sqlx::query(
+        "UPDATE invites SET expires_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(expired.invite.id)
+    .execute(srv.pool())
+    .await
+    .unwrap();
+    let revoked = invite(&srv, &owner, w.id, "member", "gone@example.org").await;
+    ok(
+        &srv,
+        Method::DELETE,
+        &owner,
+        &format!("/workspaces/{}/invites/{}", w.id, revoked.invite.id),
+        None,
+    )
+    .await;
+    let real = invite(&srv, &owner, w.id, "member", "real@example.org").await;
+    let (id, secret) = real.token.split_once('.').unwrap();
+    let cases = [
+        ("used", used.token.clone()),
+        ("expired", expired.token.clone()),
+        ("revoked", revoked.token.clone()),
+        ("junk", "junk".to_string()),
+        ("empty", String::new()),
+        ("wrong secret", format!("{id}.{}", "A".repeat(43))),
+        (
+            "unknown id",
+            format!("{}.{secret}", uuid::Uuid::now_v7().simple()),
+        ),
+        ("too long", format!("{id}.{secret}{}", "A".repeat(300))),
+    ];
+    let mut bodies = vec![];
+    for (what, token) in cases {
+        let (s, v) = preview(&srv, &token).await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (403, Some("invite_invalid")),
+            "{what}: {v}"
+        );
+        bodies.push(v);
+    }
+    assert!(bodies.windows(2).all(|b| b[0] == b[1]), "{bodies:?}");
+    assert_eq!(preview(&srv, &real.token).await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preview_waits_for_no_accept() {
+    let srv = spawn_invite_mode().await;
+    let owner = register(&srv, "owner").await;
+    let w = workspace(&srv, &owner, &[]).await;
+    let inv = invite(&srv, &owner, w.id, "member", "x@example.org").await;
+    // An accept in progress holds the workspace lock and the invite's row lock.
+    let mut tx = srv.pool().begin().await.unwrap();
+    server::invites::prepare(&mut tx, &inv.token).await.unwrap();
+    let (s, v) = tokio::time::timeout(std::time::Duration::from_secs(5), preview(&srv, &inv.token))
         .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200);
-    assert!(resp.text().await.unwrap().contains("Commons app"));
+        .expect("the preview took no lock");
+    assert_eq!(s, 200, "{v}");
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

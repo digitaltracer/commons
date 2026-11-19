@@ -46,6 +46,7 @@ Edit `deploy/.env`:
 - `COMMONS_REGISTRATION`: `open`, `closed` or `invite` (the examples use `invite`). In invite mode an account needs an invite link, except the very first account on an empty server, so register yourself first. Refused registrations get a 403 with a message the desktop app shows. The old `allowlist` mode and `COMMONS_REGISTRATION_ALLOWLIST` are gone; if either is still set, `commonsd` stops at startup and says to use `invite`.
 - `COMMONS_MAX_FILE_BYTES=104857600` (100 MiB) and `COMMONS_USER_QUOTA_BYTES=2147483648` (2 GiB) for a test box. If you change the file limit, change `client_max_body_size` in the nginx site to match.
 - `COMMONS_SMTP_URL` is left empty, so **password-reset email is off**: reset requests are accepted and logged, but no email goes out and no link is kept. Set it, and `COMMONS_MAIL_FROM`, to turn reset on.
+- `COMMONS_APP_DOWNLOAD_URL`: where **Download for Mac** on the invite page points. Empty means `https://github.com/digitaltracer/commons/releases/latest`.
 - `COMMONS_TRUSTED_PROXIES`: login and reset are limited per email and per client IP. The client IP comes from nginx's `X-Real-IP` only when the connection is from loopback or a listed proxy. Under compose, nginx connects through the `edge` network's gateway. `compose.yaml` fixes that network at `172.30.90.0/24`, and both it and `env.example` default this to the gateway, `172.30.90.1`. If that subnet clashes with a network on the host, change the subnet, the gateway and this value together; otherwise every client shares one per-IP limit.
 
 `deploy/.env` is git-ignored and excluded from the Docker build context. Postgres reads its password only on first start, when the volume is empty. To change it later, run `ALTER ROLE commons PASSWORD '…'` and update the file.
@@ -92,7 +93,7 @@ Anyone else holding the link is refused with `invite_email_mismatch`, "This invi
 
 The server has no mail, so a password sign-up proves only that the person knows the invited address and holds the link, not that they own the mailbox. Google sign-up does check ownership, through the verified flag.
 
-Opened in a browser, the link shows a page saying to paste it into the app. The token is shown only when the link is made; the server keeps its hash. Owners and admins list and revoke invites through `GET` and `DELETE /v1/workspaces/{id}/invites`, and create them with `POST` and `{"email", "role", "expires_in_days"}`.
+Opened in a browser, the link shows an invite page with **Open in Commons**, which opens the installed app on the invite (`commons://invite?server=<this server>#<token>`), **Download for Mac** (`COMMONS_APP_DOWNLOAD_URL`), and the paste-it-yourself instructions as a fallback. The page sends its own `Content-Security-Policy`, which allows only its inline script by hash, so nginx needs no change for it. The token is shown only when the link is made; the server keeps its hash. Owners and admins list and revoke invites through `GET` and `DELETE /v1/workspaces/{id}/invites`, and create them with `POST` and `{"email", "role", "expires_in_days"}`.
 
 ## Sign-in with Google (OIDC)
 

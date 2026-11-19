@@ -37,7 +37,12 @@ pub struct Config {
     pub registration: Registration,
     /// Sign-in through an OIDC provider; on only when all four `COMMONS_OIDC_*` are set.
     pub oidc: Option<OidcConfig>,
+    /// Where the invite page's "Download for Mac" points.
+    pub app_download_url: String,
 }
+
+pub const DEFAULT_APP_DOWNLOAD_URL: &str =
+    "https://github.com/digitaltracer/commons/releases/latest";
 
 #[derive(Clone)]
 pub struct OidcConfig {
@@ -126,6 +131,7 @@ impl Default for Config {
             user_quota_bytes: 20 << 30,
             registration: Registration::Open,
             oidc: None,
+            app_download_url: DEFAULT_APP_DOWNLOAD_URL.into(),
         }
     }
 }
@@ -151,6 +157,9 @@ impl Config {
             c.files_dir = v;
         }
         c.s3_bucket = var("COMMONS_S3_BUCKET");
+        if let Some(v) = var("COMMONS_APP_DOWNLOAD_URL") {
+            c.app_download_url = v;
+        }
         if let Some(v) = var("COMMONS_TRUSTED_PROXIES") {
             c.trusted_proxies = v
                 .split(',')
