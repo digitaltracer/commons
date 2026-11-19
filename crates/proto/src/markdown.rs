@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 use crate::model::Entity;
 
+mod highlight;
+pub use highlight::{Style, highlight};
+
 /// What a mention span points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Target {
@@ -58,6 +61,33 @@ pub const MAX_GAP: u8 = 3;
 /// spans, so Markdown inside a name is never interpreted. Entities that are out of range,
 /// overlap, or split a character are ignored and their text renders as usual.
 pub fn render_with_entities(source: &str, entities: &[Entity]) -> Vec<Node> {
+    let placed = place(source, entities);
+    if placed.spans.is_empty() {
+        return render(source);
+    }
+    let originals: Vec<(String, Target)> = placed
+        .spans
+        .iter()
+        .map(|p| (source[p.src.clone()].to_string(), p.target))
+        .collect();
+    restore(render(&placed.text), &originals)
+}
+
+/// One entity swapped for a placeholder: where it is in the source and in the placed text.
+struct PlacedSpan {
+    src: std::ops::Range<usize>,
+    text: std::ops::Range<usize>,
+    target: Target,
+}
+
+/// The source with each usable entity swapped for a private-use placeholder, which the
+/// parser treats as plain text.
+struct Placed {
+    text: String,
+    spans: Vec<PlacedSpan>,
+}
+
+fn place(source: &str, entities: &[Entity]) -> Placed {
     let mut spans: Vec<(usize, usize, Target)> = entities
         .iter()
         .filter_map(|e| match e {
@@ -86,26 +116,35 @@ pub fn render_with_entities(source: &str, entities: &[Entity]) -> Vec<Node> {
             kept.push(sp);
         }
     }
-    if kept.is_empty() {
-        return render(source);
-    }
-    // Swap each span for a private-use placeholder, render, then swap them back.
+    // U+FFFD has the same UTF-8 length as the markers, so offsets outside spans keep their shift.
     let clean = |t: &str| t.replace([OPEN, CLOSE], "\u{FFFD}");
     let mut text = String::new();
+    let mut placed = Vec::with_capacity(kept.len());
     let mut last = 0;
-    for (i, (s, e, _)) in kept.iter().enumerate() {
-        text.push_str(&clean(&source[last..*s]));
+    for (i, (s, e, target)) in kept.into_iter().enumerate() {
+        text.push_str(&clean(&source[last..s]));
+        let at = text.len();
         text.push(OPEN);
         text.push_str(&i.to_string());
         text.push(CLOSE);
-        last = *e;
+        placed.push(PlacedSpan {
+            src: s..e,
+            text: at..text.len(),
+            target,
+        });
+        last = e;
     }
     text.push_str(&clean(&source[last..]));
-    let originals: Vec<(String, Target)> = kept
-        .iter()
-        .map(|(s, e, t)| (source[*s..*e].to_string(), *t))
-        .collect();
-    restore(render(&text), &originals)
+    Placed {
+        text,
+        spans: placed,
+    }
+}
+
+fn options() -> Options {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts
 }
 
 fn restore(nodes: Vec<Node>, spans: &[(String, Target)]) -> Vec<Node> {
@@ -187,8 +226,7 @@ fn unplace(t: &str, spans: &[(String, Target)]) -> String {
 }
 
 pub fn render(source: &str) -> Vec<Node> {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    let opts = options();
     let mut stack: Vec<(Option<Frame>, Vec<Node>)> = vec![(None, Vec::new())];
     let mut lists: Vec<(Option<u64>, Vec<Vec<Node>>)> = Vec::new();
     let mut code_block: Option<(Option<String>, String)> = None;
@@ -374,8 +412,26 @@ fn linkify(nodes: Vec<Node>) -> Vec<Node> {
 }
 
 fn split_urls(t: &str, out: &mut Vec<Node>) {
-    let lower = t.to_ascii_lowercase();
     let mut last = 0;
+    for r in url_ranges(t) {
+        if r.start > last {
+            out.push(Node::Text(t[last..r.start].to_string()));
+        }
+        out.push(Node::Link {
+            href: t[r.clone()].to_string(),
+            children: vec![Node::Text(t[r.clone()].to_string())],
+        });
+        last = r.end;
+    }
+    if last < t.len() {
+        out.push(Node::Text(t[last..].to_string()));
+    }
+}
+
+/// Where the bare `http(s)://` URLs in `t` are.
+fn url_ranges(t: &str) -> Vec<std::ops::Range<usize>> {
+    let lower = t.to_ascii_lowercase();
+    let mut found = vec![];
     let mut from = 0;
     while let Some(s) = ["https://", "http://"]
         .iter()
@@ -406,19 +462,10 @@ fn split_urls(t: &str, out: &mut Vec<Node>) {
         {
             continue;
         }
-        if s > last {
-            out.push(Node::Text(t[last..s].to_string()));
-        }
-        out.push(Node::Link {
-            href: t[s..e].to_string(),
-            children: vec![Node::Text(t[s..e].to_string())],
-        });
-        last = e;
+        found.push(s..e);
         from = e;
     }
-    if last < t.len() {
-        out.push(Node::Text(t[last..].to_string()));
-    }
+    found
 }
 
 /// Length of `candidate` without trailing punctuation, keeping a `)` or `]` that closes one
