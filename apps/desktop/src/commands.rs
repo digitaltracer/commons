@@ -36,6 +36,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         retry_send,
         discard_send,
         set_focus,
+        set_window_active,
         typing,
         create_workspace,
         create_channel,
@@ -325,6 +326,15 @@ fn set_focus(host: State<'_, Host>, account_id: Uuid, conversation_id: Option<Uu
         } else {
             None
         });
+    }
+    Ok(())
+}
+
+/// The window gained or lost focus or visibility.
+#[tauri::command]
+fn set_window_active(host: State<'_, Host>, active: bool) -> R<()> {
+    for a in host.core.accounts() {
+        a.set_window_active(active);
     }
     Ok(())
 }
@@ -664,7 +674,7 @@ fn toggle_reaction(
 #[tauri::command]
 async fn mark_read(host: State<'_, Host>, account_id: Uuid, conversation_id: Uuid) -> R<()> {
     let a = host.core.account(account_id).map_err(err)?;
-    a.mark_read(conversation_id).await.map_err(err)
+    a.mark_seen(conversation_id).await.map_err(err)
 }
 
 /// A thread root as the UI names it (a client id) to the server id.

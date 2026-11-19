@@ -101,6 +101,8 @@ pub struct Inner {
     connection: Mutex<ConnectionState>,
     session_end: Mutex<Option<SessionEnd>>,
     focus: Mutex<Option<Uuid>>,
+    /// The app window is focused and visible; while it isn't, nothing counts as in view.
+    window_active: std::sync::atomic::AtomicBool,
     wake_backfill: Notify,
     wake_outbox: Notify,
     wake_flush: Notify,
@@ -165,6 +167,7 @@ impl Account {
             connection: Mutex::new(ConnectionState::Offline),
             session_end: Mutex::new(None),
             focus: Mutex::new(None),
+            window_active: std::sync::atomic::AtomicBool::new(true),
             wake_backfill: Notify::new(),
             wake_outbox: Notify::new(),
             wake_flush: Notify::new(),
@@ -1143,6 +1146,15 @@ impl Account {
     }
 
     /// Marks a conversation read up to its newest cached message, here and on the server.
+    /// Marks a conversation read because the reader is looking at it: only while the window
+    /// is active, so a conversation left open in the background stays unread.
+    pub async fn mark_seen(&self, conversation_id: Uuid) -> Result<(), SyncError> {
+        if !self.window_active() {
+            return Ok(());
+        }
+        self.mark_read(conversation_id).await
+    }
+
     pub async fn mark_read(&self, conversation_id: Uuid) -> Result<(), SyncError> {
         let seq = self.store.latest_seq(conversation_id)?;
         if seq <= self.store.read_cursor(conversation_id)? {
@@ -1341,6 +1353,20 @@ impl Account {
 
     pub fn focused(&self) -> Option<Uuid> {
         self.focus.lock().ok().and_then(|f| *f)
+    }
+
+    pub fn set_window_active(&self, active: bool) {
+        self.window_active
+            .store(active, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn window_active(&self) -> bool {
+        self.window_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The conversation the reader is looking at: the focused one, while the window is active.
+    pub fn in_view(&self) -> Option<Uuid> {
+        self.window_active().then(|| self.focused()).flatten()
     }
 
     pub fn typing(&self, conversation_id: Uuid) {
@@ -1634,7 +1660,7 @@ pub fn should_present(focused: Option<Uuid>, n: &Notification) -> bool {
 
 fn present_notification(account: &Account, n: &Notification) {
     (account.events)(account.id, AccountEvent::Notification(n.clone()));
-    if !should_present(account.focused(), n) {
+    if !should_present(account.in_view(), n) {
         return;
     }
     let title = match n.reason {
@@ -1797,6 +1823,78 @@ mod tests {
         let view = acc.view().unwrap();
         assert!(view.workspaces.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_background_window_sees_nothing() {
+        let (acc, _) = offline_account(Arc::new(SqliteStore::in_memory().unwrap()));
+        let c = Uuid::from_u128(1);
+        acc.set_focus(Some(c));
+        assert_eq!(acc.in_view(), Some(c));
+        assert!(!should_present(acc.in_view(), &n(c)));
+        acc.set_window_active(false);
+        assert_eq!(acc.in_view(), None);
+        assert!(should_present(acc.in_view(), &n(c)));
+        acc.set_window_active(true);
+        assert_eq!(acc.in_view(), Some(c));
+    }
+
+    #[tokio::test]
+    async fn a_background_window_marks_nothing_read() {
+        let (acc, _) = offline_account(Arc::new(SqliteStore::in_memory().unwrap()));
+        let ws = Uuid::from_u128(9);
+        let conv = Conversation {
+            id: Uuid::from_u128(8),
+            workspace_id: ws,
+            kind: ConversationKind::Public,
+            name: Some("g".into()),
+            dm_user_ids: vec![],
+        };
+        let other = Uuid::from_u128(2);
+        acc.store
+            .commit(vec![
+                Op::AddWorkspace {
+                    workspace: Workspace {
+                        id: ws,
+                        name: "w".into(),
+                    },
+                    since: 0,
+                },
+                Op::GrantAccess {
+                    conversation: conv.clone(),
+                    access_seq: 1,
+                },
+                Op::MergeMessage(Message {
+                    id: Uuid::from_u128(30),
+                    workspace_id: ws,
+                    conversation_id: conv.id,
+                    author_id: other,
+                    client_id: Uuid::from_u128(31),
+                    thread_root_id: None,
+                    body: "hi".into(),
+                    entities: vec![],
+                    content_type: "text/markdown".into(),
+                    encryption: None,
+                    attachments: vec![],
+                    reactions: vec![],
+                    revision: 1,
+                    deleted: false,
+                    created_seq: 5,
+                    updated_seq: 5,
+                    created_at_ms: 0,
+                    edited_at_ms: None,
+                }),
+            ])
+            .unwrap();
+        let me = acc.user.id;
+        assert_eq!(acc.store.unread(conv.id, me).unwrap().0, 1);
+        acc.set_window_active(false);
+        acc.mark_seen(conv.id).await.unwrap();
+        assert_eq!(acc.store.unread(conv.id, me).unwrap().0, 1);
+        acc.set_window_active(true);
+        // The cursor moves locally before the (unreachable) server is told.
+        let _ = acc.mark_seen(conv.id).await;
+        assert_eq!(acc.store.unread(conv.id, me).unwrap().0, 0);
     }
 
     #[test]
