@@ -23,6 +23,9 @@ use crate::transport::{Method, Transport, TransportError, call};
 use crate::views::{self, Names};
 use crate::window::{RowSource, Sink, WindowServer};
 
+mod staging;
+pub use staging::{DraftKey, MAX_FILES};
+
 /// Sends that cannot be delivered for this long give up and surface as failed.
 pub const OUTBOX_GIVE_UP: Duration = Duration::from_secs(7 * 24 * 3600);
 const BACKFILL_PAGE: i64 = 100;
@@ -49,6 +52,11 @@ pub enum AccountEvent {
         online: Vec<Uuid>,
     },
     Notification(Notification),
+    Staged {
+        conversation_id: Uuid,
+        thread_root_id: Option<Uuid>,
+        files: Vec<proto::view::StagedFile>,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(Uuid, AccountEvent) + Send + Sync>;
@@ -114,6 +122,10 @@ pub struct Inner {
     apply_lock: Mutex<()>,
     /// Serialises composer draft read-modify-writes.
     drafts_lock: Mutex<()>,
+    /// Files waiting in composers, by composer.
+    staging: Mutex<staging::Lists>,
+    /// Where copies of pasted files wait for their upload.
+    staging_dir: PathBuf,
     #[cfg(feature = "testing")]
     pub faults: Faults,
     /// Every workspace event this account received, for permission tests.
@@ -152,6 +164,7 @@ impl Account {
         notifier: Arc<dyn Notifier>,
         events: EventSink,
     ) -> Account {
+        let staging_dir = config.data_dir.join("staged-uploads");
         Account(Arc::new(Inner {
             id: config.id,
             server_url: config.server_url,
@@ -177,6 +190,8 @@ impl Account {
             online: Mutex::new(HashSet::new()),
             apply_lock: Mutex::new(()),
             drafts_lock: Mutex::new(()),
+            staging: Mutex::new(Default::default()),
+            staging_dir,
             #[cfg(feature = "testing")]
             faults: Faults::default(),
             #[cfg(feature = "testing")]
@@ -1430,6 +1445,17 @@ impl Account {
         conversation_id: Uuid,
         path: &std::path::Path,
     ) -> Result<proto::model::FileInfo, SyncError> {
+        self.upload_file_with(conversation_id, path, Arc::new(|_| {}))
+            .await
+    }
+
+    /// [`Account::upload_file`], reporting the bytes sent so far.
+    pub async fn upload_file_with(
+        &self,
+        conversation_id: Uuid,
+        path: &std::path::Path,
+        progress: crate::transport::Progress,
+    ) -> Result<proto::model::FileInfo, SyncError> {
         let token = self.token()?;
         let name = path
             .file_name()
@@ -1442,6 +1468,7 @@ impl Account {
                 &[("name", name)],
                 path,
                 &token,
+                progress,
             )
             .await
             .map_err(SyncError::from_transport)?;

@@ -79,6 +79,9 @@ pub fn App() -> impl IntoView {
                 }),
                 AppEvent::Error { message } => ipc::warn(message),
                 AppEvent::UpdateReady { version } => update.set(Some(version)),
+                AppEvent::Staged { .. }
+                | AppEvent::FileDrag { .. }
+                | AppEvent::FilesDropped { .. } => {}
             },
         )
         .await;

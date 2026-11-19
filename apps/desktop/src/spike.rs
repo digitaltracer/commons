@@ -53,6 +53,7 @@ impl Transport for Offline {
         _: &[(&str, String)],
         _: &Path,
         _: &str,
+        _: client_core::transport::Progress,
     ) -> Result<serde_json::Value, TransportError> {
         Err(TransportError::Network("spike: offline".into()))
     }

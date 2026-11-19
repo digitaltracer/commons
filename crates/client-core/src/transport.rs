@@ -1,11 +1,15 @@
 //! The network behind a trait, so a browser build can swap in `fetch` and browser sockets.
 use std::path::Path;
+use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
+
+/// Called with the bytes of an upload sent so far.
+pub type Progress = Arc<dyn Fn(u64) + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -71,6 +75,7 @@ pub trait Transport: Send + Sync {
         query: &[(&str, String)],
         file: &Path,
         token: &str,
+        progress: Progress,
     ) -> Result<serde_json::Value, TransportError>;
 
     /// Fetches bytes and the content type.
@@ -199,10 +204,17 @@ impl Transport for HttpTransport {
         query: &[(&str, String)],
         file: &Path,
         token: &str,
+        progress: Progress,
     ) -> Result<serde_json::Value, TransportError> {
         let f = tokio::fs::File::open(file).await.map_err(net)?;
         let len = f.metadata().await.map_err(net)?.len();
-        let stream = tokio_util::io::ReaderStream::new(f);
+        let mut sent = 0u64;
+        let stream = tokio_util::io::ReaderStream::new(f).inspect(move |chunk| {
+            if let Ok(c) = chunk {
+                sent += c.len() as u64;
+                progress(sent);
+            }
+        });
         let resp = self
             .client
             .post(format!("{}/v1{path}", self.base))

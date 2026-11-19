@@ -176,6 +176,16 @@ impl Core {
                 (self.sink)(AppEvent::Presence { account_id, online })
             }
             AccountEvent::Notification(_) => {}
+            AccountEvent::Staged {
+                conversation_id,
+                thread_root_id,
+                files,
+            } => (self.sink)(AppEvent::Staged {
+                account_id,
+                conversation_id,
+                thread_root_id,
+                files,
+            }),
         }
     }
 
@@ -199,6 +209,7 @@ impl Core {
             self.notifier.clone(),
             self.events(),
         );
+        account.clear_staging_dir();
         account.start();
         self.accounts
             .write()

@@ -193,6 +193,55 @@ pub enum AppEvent {
     UpdateReady {
         version: String,
     },
+    /// The files waiting in one composer changed. `thread_root_id` is the composer's key.
+    Staged {
+        account_id: Uuid,
+        conversation_id: Uuid,
+        thread_root_id: Option<Uuid>,
+        files: Vec<StagedFile>,
+    },
+    /// Files are being dragged over the window, or no longer are.
+    FileDrag {
+        active: bool,
+    },
+    /// Files were dropped at this point of the window, in CSS px. The shell keeps their paths
+    /// under `drop_id`; the webview never sees them.
+    FilesDropped {
+        drop_id: u64,
+        x: f64,
+        y: f64,
+    },
+}
+
+/// A file waiting in a composer to go out with the next message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedFile {
+    /// A local id, not the server's file id.
+    pub id: Uuid,
+    pub name: String,
+    pub size: u64,
+    /// Bytes uploaded so far.
+    pub sent: u64,
+    pub state: StagedState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StagedState {
+    Uploading,
+    /// Uploaded; the server holds it as this user's unsent file.
+    Ready {
+        file_id: Uuid,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+impl StagedFile {
+    pub fn ready(&self) -> bool {
+        matches!(self.state, StagedState::Ready { .. })
+    }
 }
 
 /// Pane widths in CSS px: (smallest, default, largest).
