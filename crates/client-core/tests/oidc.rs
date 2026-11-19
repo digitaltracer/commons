@@ -208,3 +208,110 @@ async fn a_browser_that_never_comes_back_times_out() {
         "{err}"
     );
 }
+
+async fn invite_for(srv: &TestServer, owner: &Person, ws: uuid::Uuid, email: &str) -> String {
+    let invite: proto::api::InviteCreated = post(
+        srv,
+        Some(&owner.token),
+        &format!("/workspaces/{ws}/invites"),
+        serde_json::json!({"role": "member", "email": email}),
+    )
+    .await;
+    format!(
+        "commons://invite?server={}#{}",
+        srv.base_url.replace(':', "%3A").replace('/', "%2F"),
+        invite.token
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_opened_invite_link_previews_then_signs_up_with_the_provider() {
+    let (_fake, srv) = setup(Registration::Invite).await;
+    let owner = register(&srv, "owner").await;
+    let ws = workspace(&srv, &owner, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = core(dir.path(), &srv, Arc::new(MemorySecrets::default()));
+
+    let link = invite_for(&srv, &owner, ws.id, "ada@example.org").await;
+    let opened = core.open_invite_link(&link).await.unwrap();
+    assert_eq!(opened.server_url, srv.base_url);
+    assert_eq!(opened.preview.workspace_name, ws.name);
+    assert_eq!(opened.preview.inviter_name, "owner");
+    assert_eq!(
+        opened.preview.email_masked,
+        "a\u{2022}\u{2022}\u{2022}@example.org"
+    );
+    assert!(opened.accounts.is_empty(), "a new server to this app");
+    assert!(core.accounts().is_empty(), "opening a link adds nothing");
+
+    let id = core
+        .add_account_oidc(&opened.server_url, Some(&opened.token), browser)
+        .await
+        .unwrap();
+    let acc = core.account(id).unwrap();
+    eventually("the invite's workspace", || {
+        acc.view()
+            .map(|v| v.workspaces.iter().any(|w| w.id == ws.id))
+            .unwrap_or(false)
+    })
+    .await;
+
+    // The same server again: the account is offered, and the link is refused now it's used.
+    let next = invite_for(&srv, &owner, ws.id, "bob@example.org").await;
+    assert_eq!(
+        core.open_invite_link(&next).await.unwrap().accounts,
+        vec![id]
+    );
+    assert_eq!(core.accounts_on(&format!("{}/", srv.base_url)), vec![id]);
+    assert!(core.accounts_on("https://elsewhere.example").is_empty());
+    let err = core.open_invite_link(&link).await.unwrap_err().to_string();
+    assert!(err.starts_with("This invite link isn't valid."), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_opened_invite_link_signs_up_with_a_password() {
+    let (_fake, srv) = setup(Registration::Invite).await;
+    let owner = register(&srv, "owner").await;
+    let ws = workspace(&srv, &owner, &[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = core(dir.path(), &srv, Arc::new(MemorySecrets::default()));
+    let link = invite_for(&srv, &owner, ws.id, "cy@example.org").await;
+    let opened = core.open_invite_link(&link).await.unwrap();
+    let id = core
+        .add_account(
+            &opened.server_url,
+            "cy@example.org",
+            "correct horse battery",
+            Some("Cy"),
+            Some(&opened.token),
+        )
+        .await
+        .unwrap();
+    let acc = core.account(id).unwrap();
+    eventually("the invite's workspace", || {
+        acc.view()
+            .map(|v| v.workspaces.iter().any(|w| w.id == ws.id))
+            .unwrap_or(false)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_link_sends_nothing() {
+    let (_fake, srv) = setup(Registration::Invite).await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = core(dir.path(), &srv, Arc::new(MemorySecrets::default()));
+    let token = format!("{}.{}", uuid::Uuid::now_v7().simple(), "A".repeat(43));
+    for raw in [
+        format!("commons://invite?server=http://evil.example#{token}"),
+        format!("commons://reset?server=https://x.org#{token}"),
+        "commons://invite?server=https://x.org#junk".to_string(),
+    ] {
+        let err = core.open_invite_link(&raw).await.unwrap_err();
+        assert!(
+            err.downcast_ref::<client_core::deeplink::LinkError>()
+                .is_some(),
+            "refused before any request: {err}"
+        );
+    }
+}

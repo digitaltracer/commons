@@ -6,16 +6,17 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use proto::api::{
-    AcceptInvite, IdentityList, LoginRequest, Meta, OidcExchanged, RegisterRequest, SessionResponse,
+    AcceptInvite, IdentityList, InvitePreview, InvitePreviewRequest, LoginRequest, Meta,
+    OidcExchanged, RegisterRequest, SessionResponse,
 };
-use proto::view::{AppEvent, SidebarView, UiPrefs};
+use proto::view::{AppEvent, OpenedInvite, SidebarView, UiPrefs};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::account::{Account, AccountConfig, AccountEvent, EventSink};
 use crate::platform::{Notifier, SecretStore};
 use crate::store::SqliteStore;
-use crate::transport::{Method, Transport, call};
+use crate::transport::{Method, Transport, TransportError, call};
 
 pub type TransportFactory = Arc<dyn Fn(&str) -> Arc<dyn Transport> + Send + Sync>;
 pub type AppSink = Arc<dyn Fn(AppEvent) + Send + Sync>;
@@ -382,6 +383,66 @@ impl Core {
             None,
         )
         .await?)
+    }
+
+    /// What an invite is for, read from its server before anyone signs in. Errors are worded
+    /// for the person.
+    pub async fn invite_preview(
+        &self,
+        server_url: &str,
+        token: &str,
+    ) -> anyhow::Result<InvitePreview> {
+        let transport = (self.transports)(server_url);
+        call(
+            &*transport,
+            Method::Post,
+            "/invites/preview",
+            &[],
+            Some(&InvitePreviewRequest {
+                token: token.into(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| match &e {
+            TransportError::Status { body, .. } if body["message"].is_string() => {
+                anyhow::anyhow!("{}", body["message"].as_str().unwrap_or_default())
+            }
+            TransportError::Network(_) => anyhow::anyhow!(
+                "Couldn't reach {}. Check your connection, then open the link again.",
+                server_url.split("://").last().unwrap_or(server_url)
+            ),
+            TransportError::Status { .. } => {
+                anyhow::anyhow!("The server couldn't check this invite. Try again later.")
+            }
+        })
+    }
+
+    /// This device's accounts on the server at `server_url`, by origin.
+    pub fn accounts_on(&self, server_url: &str) -> Vec<Uuid> {
+        let mut found: Vec<_> = self
+            .accounts()
+            .into_iter()
+            .filter(|a| crate::deeplink::same_origin(&a.server_url, server_url))
+            .map(|a| a.id)
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Checks a `commons://` link and previews its invite. Nothing else is sent anywhere,
+    /// and no account is touched: the result only fills in a form.
+    pub async fn open_invite_link(&self, raw: &str) -> anyhow::Result<OpenedInvite> {
+        let link = crate::deeplink::parse(raw)?;
+        let preview = self.invite_preview(&link.server_url, &link.token).await?;
+        Ok(OpenedInvite {
+            accounts: self.accounts_on(&link.server_url),
+            server_url: link.server_url,
+            host: link.host,
+            token: link.token,
+            preview,
+        })
     }
 
     /// A fresh cancel signal for the one provider flow that may run at a time; starting a

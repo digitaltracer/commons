@@ -213,6 +213,19 @@ pub enum AppEvent {
     },
 }
 
+/// An invite link the app was opened with, checked and previewed. It only fills in a form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenedInvite {
+    /// The server's origin, such as `https://commons.example.org`.
+    pub server_url: String,
+    /// The server's host (and port, if any), shown prominently.
+    pub host: String,
+    pub token: String,
+    pub preview: crate::api::InvitePreview,
+    /// This device's accounts on that server. None means it is a new server to this app.
+    pub accounts: Vec<Uuid>,
+}
+
 /// A file waiting in a composer to go out with the next message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedFile {
