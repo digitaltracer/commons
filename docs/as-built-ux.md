@@ -115,3 +115,31 @@ Live Markdown in the composer, staged uploads (B8), `:emoji:` and a searchable p
 ## Left
 - Not checked in the real app (this session can't drive native windows): IME composition (Japanese, Pinyin), autocorrect, VoiceOver reading the field and suggestion lists, native drag and drop from Finder, pasting a Finder copy in WKWebView, and the picker dialog with several files. The IME path relies on the field's value never being rewritten while it matches, which the harness confirmed for typing but not for marked text.
 - Staged files are lost on restart, and the server never reclaims unsent uploads.
+
+# UI audit fixes (2026-11-19)
+
+Eight problems from the UI audit, fixed before 0.1.0. The audit's ids are in brackets.
+
+## Fixed
+- **Dialogs keep focus (UI-01).** Every dialog built on the shared `Dialog` takes focus when it opens: its `autofocus` field, or else the dialog itself, never its first button. Tab and Shift-Tab wrap inside it, focus moved out by code is pulled back, Escape closes it wherever focus is unless a control inside used the key, and focus goes back to where it was when the dialog closes. Typing after ⌘/ no longer reaches the composer.
+- **Removing an account asks first (UI-02).** Manage accounts now opens the same confirmation as the sign-in sheet, which counts unsent messages. Cancel has focus.
+- **Editing a queued message keeps the draft (UI-03).** See the rule below.
+- **The sidebar scrolls (UI-04).** The conversation list scrolls and the account footer stays at the bottom of the window. The sidebar column was missing `min-height: 0`.
+- **Show more follows the width (UI-05).** A message body is measured again when its width changes. Only bodies at least three lines tall are watched, since a shorter one would need a column a quarter as wide to pass the twelve-line clamp. Each watch stops when its row goes.
+- **The delete popover (UI-06, UI-21).** It closes when the window is resized, and focus goes back to the trash button. It opens with Cancel focused.
+- **Starting a conversation says why it failed (UI-07).** The New message form shows the server's refusal. Once eight people are picked, the other checkboxes are disabled, and the footer keeps the limit in view.
+- **A pasted invite offers the account choice (UI-09).** A pasted link follows the same rule as an opened one: no account on its server leads to sign-up, one account joins, and several accounts show the same Join as picker, with the first one chosen.
+
+## The rule for queued edits
+Edit on a queued message moves its text into the composer only when the composer is empty. If the composer holds a draft, nothing changes: the message stays queued, the draft stays, and a line under the composer says to send or clear the draft first. The composer discards the queued message itself, so the text is never removed before it has somewhere to go.
+
+Editing in place, in the row, would need the core to change an outbox entry's text, so it was left out.
+
+## Checks
+- Desktop UI tests: Escape and Tab in a dialog, the queued-edit rule, the eight-person limit, and the routing of a pasted invite (two accounts on its server, one, none, and a bare token).
+- Browser harness, with the audit's stub, before and after each fix: the shortcut sheet took focus and a typed Return sent nothing; Tab stayed inside Account settings for twelve presses and wrapped back; Escape closed the sheet after the composer was focused from code. Manage accounts removed nothing on the first click and Return on Cancel backed out. A queued edit with a draft kept both, and with an empty composer moved the text. With 74 conversations at 1000 × 700 the list scrolled and the footer stayed visible. Narrowing from 1440 to 900 px added Show more, and widening took it away. A resize closed the delete popover and returned focus to the trash button. Nine people couldn't be picked, and a refused start showed the reason. Pasting a link for a server with two accounts showed both, and Join used the one chosen.
+
+## Left
+- Not checked in WKWebView: dialog focus and Tab order, which follow Safari's rules for buttons (a click doesn't focus a button there, so focus may return to the page instead of the trash button or the opener).
+- A queued thread reply's Edit still goes to the channel's composer, not the thread's.
+- Delete on a queued message still skips confirmation (UI-13), and the narrow thread overlay still lets Tab reach the conversation behind it (UI-14). The switcher and the jump palette aren't built on `Dialog` and keep their own focus handling.
