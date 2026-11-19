@@ -471,7 +471,11 @@ fn tiny_pdf(words: &str) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pdf_text_is_extracted_in_a_child_process() {
-    let srv = server::testing::spawn(|c| c.job_workers = 0).await;
+    let srv = server::testing::spawn(|c| {
+        c.job_workers = 0;
+        c.extract_program = Some(env!("CARGO_BIN_EXE_commonsd").into());
+    })
+    .await;
     let alice = register(&srv, "alice").await;
     let ws = workspace(&srv, &alice, &[]).await;
     let c = channel(&srv, &alice, ws.id, "c", false).await;

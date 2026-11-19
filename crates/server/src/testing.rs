@@ -97,16 +97,27 @@ impl Drop for TestServer {
     }
 }
 
+/// The `commonsd` cargo built beside the running test: `target/<profile>/commonsd`. Test
+/// binaries sit at different depths below it (`deps/`, or `build/<pkg>/<hash>/out/` from
+/// Rust 1.100), so search upwards rather than assume one layout.
+fn built_commonsd() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_commonsd") {
+        return Some(p.into());
+    }
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .skip(1)
+        .map(|d| d.join("commonsd"))
+        .find(|p| p.is_file())
+}
+
 pub fn test_config(database_url: String) -> Config {
     Config {
         database_url,
         auth_attempts_per_minute: 10_000,
         repair_interval: std::time::Duration::from_millis(500),
         job_poll: std::time::Duration::from_millis(50),
-        // Test binaries live in target/<profile>/deps; commonsd is one level up.
-        extract_program: std::env::current_exe()
-            .ok()
-            .and_then(|p| Some(p.parent()?.parent()?.join("commonsd"))),
+        extract_program: built_commonsd(),
         files_dir: std::env::temp_dir()
             .join(format!("commons-files-{}", Uuid::now_v7().simple()))
             .to_string_lossy()

@@ -333,9 +333,9 @@ async fn admins_toggle_guests_and_see_join_dates_and_presence() {
 async fn the_commonsd_binary_runs_admin_commands() {
     let srv = server::testing::spawn(|_| {}).await;
     let alice = register(&srv, "alice").await;
-    let bin = srv.state.config.extract_program.clone().unwrap();
+    let bin = env!("CARGO_BIN_EXE_commonsd");
     let run = |args: &[&str]| {
-        std::process::Command::new(&bin)
+        std::process::Command::new(bin)
             .arg("admin")
             .args(args)
             .env_clear()
