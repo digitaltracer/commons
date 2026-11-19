@@ -40,6 +40,8 @@ For development (Rust via rustup, the `wasm32-unknown-unknown` target, `trunk`, 
 
 Both build once with `cargo tauri build --debug --no-bundle` and run `target/debug/commons-desktop` directly; rerun them to pick up changes. Avoid `cargo tauri dev`: it rebuilds on every workspace change, and on macOS a Ctrl+C can leave its cleanup script spinning. Debug builds keep session tokens in `secrets.json` in the app's data directory rather than the keychain, because each rebuild changes the binary's signature and the keychain would ask for a password on every launch. Set `COMMONS_SECRETS=keychain` or `file` to choose either store.
 
+To build a signed, notarized Mac release with its update files, see [Releasing the Mac app](docs/release.md) (`cargo xtask release`).
+
 ## Contributing
 
 Commons is built in the open, and every kind of help counts: code, design, docs, testing, and ideas.
