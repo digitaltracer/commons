@@ -21,12 +21,28 @@ const STEP: u32 = 100;
 
 thread_local! {
     static LAST_READ: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static READ_LATER: std::cell::Cell<Option<(Uuid, Uuid)>> = const { std::cell::Cell::new(None) };
 }
 
-/// Marks the conversation read at most once a second while the reader is at the bottom.
+/// Marks the conversation read at most once a second, with a trailing mark so the last
+/// message of a burst isn't left unread. The core ignores it while the window is inactive.
 fn mark_read_soon(account_id: Uuid, conversation_id: Uuid) {
     let now = ipc::now_ms();
-    if now - LAST_READ.with(|l| l.get()) < 1000.0 {
+    let wait = 1000.0 - (now - LAST_READ.with(|l| l.get()));
+    if wait > 0.0 {
+        if READ_LATER
+            .with(|p| p.replace(Some((account_id, conversation_id))))
+            .is_none()
+        {
+            set_timeout(
+                || {
+                    if let Some((a, c)) = READ_LATER.with(|p| p.take()) {
+                        mark_read_soon(a, c);
+                    }
+                },
+                std::time::Duration::from_millis(wait as u64 + 1),
+            );
+        }
         return;
     }
     LAST_READ.with(|l| l.set(now));
@@ -34,6 +50,54 @@ fn mark_read_soon(account_id: Uuid, conversation_id: Uuid) {
         "mark_read",
         json!({"accountId": account_id, "conversationId": conversation_id}),
     );
+}
+
+/// The row the New line sits above: the `unread`-th message from someone else, counting back.
+fn first_unread(rows: &[WindowRow], unread: u32) -> Option<Uuid> {
+    let mut n = 0;
+    for r in rows.iter().rev() {
+        if !r.message.mine {
+            n += 1;
+            if n == unread {
+                return Some(r.key);
+            }
+        }
+    }
+    None
+}
+
+/// Messages from others appended after the row that was last before this batch.
+fn arrivals(old: &[WindowRow], new: &[WindowRow]) -> u32 {
+    let Some(last) = old.last() else { return 0 };
+    match new.iter().position(|r| r.key == last.key) {
+        Some(i) => new[i + 1..].iter().filter(|r| !r.message.mine).count() as u32,
+        None => 0,
+    }
+}
+
+fn row_el(list: &web_sys::HtmlElement, key: Uuid) -> Option<web_sys::HtmlElement> {
+    list.query_selector(&format!("[data-key='{key}']"))
+        .ok()
+        .flatten()
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+}
+
+/// Still placeholder rows until the first batch arrives.
+fn skeleton() -> impl IntoView {
+    let widths = [(140, 82), (110, 64), (160, 74), (96, 48)];
+    view! {
+        <div class="skel" aria-hidden="true">
+            {widths.into_iter().map(|(name, line)| view! {
+                <div class="skrow">
+                    <span class="sk skav"></span>
+                    <div class="skl">
+                        <span class="sk" style=format!("width: {name}px")></span>
+                        <span class="sk" style=format!("width: {line}%")></span>
+                    </div>
+                </div>
+            }).collect_view()}
+        </div>
+    }
 }
 
 #[component]
@@ -44,16 +108,37 @@ pub fn MessageList(
     #[prop(into)] label: String,
 ) -> impl IntoView {
     let c = ctx();
+    let main = thread_root_id.is_none();
+    let list_key = (conversation_id, thread_root_id);
+    // Coming back to a list opens it where it was left, unless that was the end.
+    let saved = c.anchors.with_value(|a| a.get(&list_key).copied());
     let rows: RwSignal<Vec<WindowRow>> = RwSignal::new(vec![]);
     let total = RwSignal::new(0u32);
     let loaded = RwSignal::new(false);
     let client = StoredValue::new(WindowClient::new());
     let sub_id = StoredValue::new(None::<u64>);
-    let offset = StoredValue::new(0u32);
-    let pinned = StoredValue::new(true);
+    let offset = StoredValue::new(saved.map_or(0, |a| a.offset));
+    let pinned = StoredValue::new(saved.is_none());
     let last_top = StoredValue::new(0i32);
-    let anchor = StoredValue::new(None::<(Uuid, f64)>);
+    let anchor = StoredValue::new(saved.map(|a| (a.key, a.top)));
     let scroller: NodeRef<Div> = NodeRef::new();
+    // The unread count when the conversation opened fixes where the New line goes.
+    let unread_at_open = if main {
+        untrack(|| {
+            c.conversation(crate::state::Selection {
+                account_id,
+                conversation_id,
+            })
+            .map_or(0, |(_, cv)| cv.unread)
+        })
+    } else {
+        0
+    };
+    let new_from = RwSignal::new(None::<Uuid>);
+    let first_batch = StoredValue::new(true);
+    let open_at_new = StoredValue::new(false);
+    let away = RwSignal::new(saved.is_some());
+    let arrived = RwSignal::new(0u32);
 
     let spec = move |off: u32| WindowSpec {
         account_id,
@@ -63,6 +148,18 @@ pub fn MessageList(
         limit: MAX_WINDOW_ROWS,
     };
 
+    // Reading: the main list at its newest row, in an active window, after it has opened.
+    let seen = move || {
+        if main
+            && pinned.get_value()
+            && c.active.get_untracked()
+            && !first_batch.get_value()
+            && !open_at_new.get_value()
+        {
+            mark_read_soon(account_id, conversation_id);
+        }
+    };
+
     let after_render = move || {
         ipc::next_frame(move || {
             let Some(el) = scroller.get_untracked() else {
@@ -70,18 +167,26 @@ pub fn MessageList(
             };
             if let Some((key, top)) = anchor.get_value() {
                 anchor.set_value(None);
-                if let Some(row) = el
-                    .query_selector(&format!("[data-key='{key}']"))
-                    .ok()
-                    .flatten()
-                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
-                {
+                if let Some(row) = row_el(&el, key) {
                     el.set_scroll_top(row.offset_top() - top as i32);
+                    return;
+                }
+            }
+            if open_at_new.get_value() {
+                open_at_new.set_value(false);
+                // More unread than fits on a screen: open at the New line, not the end.
+                if let Some(row) = new_from.get_untracked().and_then(|k| row_el(&el, k))
+                    && row.offset_top() < el.scroll_height() - el.client_height()
+                {
+                    pinned.set_value(false);
+                    away.set(true);
+                    el.set_scroll_top(row.offset_top() - 36);
                     return;
                 }
             }
             if pinned.get_value() {
                 el.set_scroll_top(el.scroll_height());
+                seen();
             }
         });
     };
@@ -99,8 +204,15 @@ pub fn MessageList(
         };
         match applied {
             Applied::Ack(revision) => {
-                if pinned.get_value() && thread_root_id.is_none() {
-                    mark_read_soon(account_id, conversation_id);
+                if first_batch.get_value() {
+                    first_batch.set_value(false);
+                    if unread_at_open > 0 {
+                        new_from.set(first_unread(&new_rows, unread_at_open));
+                        open_at_new.set_value(saved.is_none());
+                    }
+                } else if !pinned.get_value() {
+                    let n = rows.with_untracked(|old| arrivals(old, &new_rows));
+                    arrived.update(|a| *a += n);
                 }
                 let mine = new_rows
                     .iter()
@@ -111,10 +223,10 @@ pub fn MessageList(
                     .map(|r| r.message.clone());
                 c.last_mine.update_value(|l| match mine {
                     Some(m) => {
-                        l.insert((conversation_id, thread_root_id), m);
+                        l.insert(list_key, m);
                     }
                     None => {
-                        l.remove(&(conversation_id, thread_root_id));
+                        l.remove(&list_key);
                     }
                 });
                 rows.set(new_rows);
@@ -135,10 +247,11 @@ pub fn MessageList(
         }
     };
 
+    let first_spec = spec(offset.get_value());
     leptos::task::spawn_local(async move {
         let r: Result<u64, String> = ipc::invoke_with_channel(
             "subscribe_window",
-            json!({"spec": spec(0)}),
+            json!({"spec": first_spec}),
             "onBatch",
             on_batch,
         )
@@ -164,10 +277,7 @@ pub fn MessageList(
             let top = el.scroll_top() as f64;
             let first = rows.with_untracked(|rs| {
                 rs.iter().find_map(|r| {
-                    el.query_selector(&format!("[data-key='{}']", r.key))
-                        .ok()
-                        .flatten()
-                        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                    row_el(&el, r.key)
                         .filter(|e| e.offset_top() as f64 + e.offset_height() as f64 > top)
                         .map(|e| (r.key, e.offset_top() as f64 - top))
                 })
@@ -181,14 +291,15 @@ pub fn MessageList(
         );
     };
 
-    // Sending scrolls back to the newest message, moving the window there first if needed.
-    Effect::new(move |_| {
-        if c.repin.get() != Some((conversation_id, thread_root_id)) {
-            return;
-        }
-        c.repin.set(None);
+    // Back to the newest message, moving the window there first if needed.
+    let to_end = move || {
         pinned.set_value(true);
+        away.set(false);
+        arrived.set(0);
         anchor.set_value(None);
+        c.anchors.update_value(|a| {
+            a.remove(&list_key);
+        });
         if offset.get_value() > 0 {
             offset.set_value(0);
             if let Some(id) = sub_id.get_value() {
@@ -199,15 +310,67 @@ pub fn MessageList(
             }
         } else if let Some(el) = scroller.get_untracked() {
             el.set_scroll_top(el.scroll_height());
+            seen();
+        }
+    };
+
+    // Sending re-pins the list it was sent to.
+    Effect::new(move |_| {
+        if c.repin.get() == Some(list_key) {
+            c.repin.set(None);
+            to_end();
         }
     });
+    // Coming back to the window counts as reading what is on screen.
+    Effect::new(move |_| {
+        if c.active.get() {
+            seen();
+        }
+    });
+
+    // Remembers the row at the top of the list, for coming back to this conversation.
+    let remember = move |el: &web_sys::HtmlDivElement| {
+        if pinned.get_value() {
+            c.anchors.update_value(|a| {
+                a.remove(&list_key);
+            });
+            return;
+        }
+        let r = el.get_bounding_client_rect();
+        let hit = document()
+            .element_from_point((r.left() + 60.0) as f32, (r.top() + 8.0) as f32)
+            .and_then(|e| e.closest("[data-key]").ok().flatten())
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok());
+        if let Some(row) = hit
+            && let Some(key) = row.get_attribute("data-key").and_then(|k| k.parse().ok())
+        {
+            let top = row.offset_top() as f64 - el.scroll_top() as f64;
+            let off = offset.get_value();
+            c.anchors.update_value(|a| {
+                a.insert(
+                    list_key,
+                    crate::state::Anchor {
+                        offset: off,
+                        key,
+                        top,
+                    },
+                );
+            });
+        }
+    };
 
     let on_scroll = move |_| {
         let Some(el) = scroller.get_untracked() else {
             return;
         };
         let top = el.scroll_top();
+        // Nothing to decide until rows are in and any remembered position is restored.
+        if !loaded.get_untracked() || anchor.with_value(|a| a.is_some()) {
+            last_top.set_value(top);
+            return;
+        }
         let bottom_gap = el.scroll_height() - top - el.client_height();
+        let was = pinned.get_value();
         // Content growing under a pinned list fires scroll events too; only the reader
         // scrolling up (or a window away from the end) unpins it.
         if offset.get_value() > 0 {
@@ -218,11 +381,21 @@ pub fn MessageList(
             pinned.set_value(false);
         }
         last_top.set_value(top);
+        let now = pinned.get_value();
+        if now && !was {
+            arrived.set(0);
+            seen();
+        }
+        let far = !now && (bottom_gap > 240 || offset.get_value() > 0);
+        if away.get_untracked() != far {
+            away.set(far);
+        }
+        remember(&el);
         let loaded = rows.with_untracked(|r| r.len() as u32);
         let off = offset.get_value();
-        if top < 200 && off + loaded < total.get_untracked() && anchor.get_value().is_none() {
+        if top < 200 && off + loaded < total.get_untracked() {
             move_window(off + STEP);
-        } else if bottom_gap < 200 && off > 0 && anchor.get_value().is_none() {
+        } else if bottom_gap < 200 && off > 0 {
             move_window(off.saturating_sub(STEP));
         }
     };
@@ -255,6 +428,7 @@ pub fn MessageList(
     // Day dividers sit above the first row of each day; a thread's root gets a reply count.
     let shown = move || {
         let rs = rows.get();
+        let new_key = new_from.get();
         let mut prev: Option<i64> = None;
         let mut out = Vec::with_capacity(rs.len());
         for (i, r) in rs.into_iter().enumerate() {
@@ -270,28 +444,57 @@ pub fn MessageList(
                 (None, _) => day,
                 _ => None,
             };
-            out.push((r, divider));
+            let new_line = new_key == Some(r.key);
+            out.push((r, divider, new_line));
         }
         out
     };
     let replies = move || rows.with(|r| r.len().saturating_sub(1));
+    let pill = move || {
+        let n = arrived.get();
+        (away.get() || n > 0).then(|| {
+            let text = if n > 0 {
+                format!("{n} new · Jump to latest")
+            } else {
+                "Jump to latest".to_string()
+            };
+            let label = if n > 0 {
+                format!(
+                    "Jump to latest, {n} new {}",
+                    if n == 1 { "message" } else { "messages" }
+                )
+            } else {
+                "Jump to latest".to_string()
+            };
+            view! {
+                <button class="jump" aria-label=label on:click=move |_| to_end()>
+                    {sized(Icon::ArrowDown, 15)}{text}
+                </button>
+            }
+        })
+    };
 
     view! {
-        <div class="list" node_ref=scroller on:scroll=on_scroll role="log" aria-live="polite"
-             aria-label=label tabindex="0">
-            <div class="spacer"></div>
-            <div class="lin" node_ref=content>
-            {move || (loaded.get() && rows.with(|r| r.is_empty())).then(|| empty(account_id, conversation_id, thread_root_id))}
-            <For each=shown key=|(r, d)| (r.key, r.version, d.clone()) let:item>
-                {item.1.map(|d| if d.is_empty() {
-                    view! { <div class="tsep">{move || format!("{} {}", replies(), if replies() == 1 { "reply" } else { "replies" })}</div> }.into_any()
-                } else {
-                    view! { <div class="day" role="separator">{d}</div> }.into_any()
-                })}
-                <Message account_id=account_id conversation_id=conversation_id row=item.0
-                         in_thread=thread_root_id.is_some() />
-            </For>
+        <div class="listwrap">
+            <div class="list" node_ref=scroller on:scroll=on_scroll role="log" aria-live="polite"
+                 aria-label=label aria-busy=move || (!loaded.get()).to_string() tabindex="0">
+                <div class="spacer"></div>
+                <div class="lin" node_ref=content>
+                {move || (!loaded.get()).then(skeleton)}
+                {move || (loaded.get() && rows.with(|r| r.is_empty())).then(|| empty(account_id, conversation_id, thread_root_id))}
+                <For each=shown key=|(r, d, n)| (r.key, r.version, d.clone(), *n) let:item>
+                    {item.1.map(|d| if d.is_empty() {
+                        view! { <div class="tsep">{move || format!("{} {}", replies(), if replies() == 1 { "reply" } else { "replies" })}</div> }.into_any()
+                    } else {
+                        view! { <div class="day" role="separator">{d}</div> }.into_any()
+                    })}
+                    {item.2.then(|| view! { <div class="newdiv" role="separator" aria-label="New messages">"New"</div> })}
+                    <Message account_id=account_id conversation_id=conversation_id row=item.0
+                             in_thread=thread_root_id.is_some() />
+                </For>
+                </div>
             </div>
+            {pill}
         </div>
     }
 }

@@ -25,6 +25,14 @@ pub struct Place {
     pub workspace_id: Option<Uuid>,
 }
 
+/// Where a list was left: its window offset and a row with its distance from the top.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Anchor {
+    pub offset: u32,
+    pub key: Uuid,
+    pub top: f64,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Aside {
     None,
@@ -89,6 +97,10 @@ pub struct Ctx {
     pub repin: RwSignal<Option<(Uuid, Option<Uuid>)>>,
     /// The last open came from the keyboard in the sidebar, so focus stays there.
     pub keyboard_open: StoredValue<bool>,
+    /// Lists scrolled away from their newest message, by conversation and thread (this session).
+    pub anchors: StoredValue<HashMap<(Uuid, Option<Uuid>), Anchor>>,
+    /// The window is focused and visible.
+    pub active: RwSignal<bool>,
     /// Text to put back in a conversation's composer (editing a queued send).
     pub refill: RwSignal<Option<(Uuid, String)>>,
     /// Seconds tick, for reconnect countdowns.
@@ -125,6 +137,8 @@ impl Ctx {
             last_mine: StoredValue::new(HashMap::new()),
             repin: RwSignal::new(None),
             keyboard_open: StoredValue::new(false),
+            anchors: StoredValue::new(HashMap::new()),
+            active: RwSignal::new(true),
             refill: RwSignal::new(None),
             now: RwSignal::new(js_sys::Date::now()),
             notice: RwSignal::new(None),

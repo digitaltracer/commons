@@ -158,6 +158,21 @@ pub fn App() -> impl IntoView {
         now
     });
 
+    // A conversation left open behind other windows isn't being read: tell the core.
+    let set_active = move |active: bool| {
+        if c.active.get_untracked() != active {
+            c.active.set(active);
+            ipc::command("set_window_active", json!({ "active": active }));
+        }
+    };
+    let visible = || !document().hidden();
+    let _focus = window_event_listener(leptos::ev::focus, move |_| set_active(visible()));
+    let _blur = window_event_listener(leptos::ev::blur, move |_| set_active(false));
+    let _vis = window_event_listener_untyped("visibilitychange", move |_| {
+        set_active(visible() && document().has_focus().unwrap_or(true));
+    });
+    set_active(visible() && document().has_focus().unwrap_or(true));
+
     let _tick = set_interval_with_handle(
         move || c.now.set(js_sys::Date::now()),
         std::time::Duration::from_secs(1),

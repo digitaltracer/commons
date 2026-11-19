@@ -22,6 +22,7 @@ pub enum Icon {
     Attach,
     At,
     Send,
+    ArrowDown,
     Bold,
     Italic,
     Code,
@@ -71,6 +72,7 @@ fn path(i: Icon) -> &'static str {
         }
         Icon::At => "M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8",
         Icon::Send => "M12 19V5M6 11l6-6 6 6",
+        Icon::ArrowDown => "M12 5v14M6 13l6 6 6-6",
         Icon::Bold => "M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z",
         Icon::Italic => "M19 4h-9M14 20H5M15 4 9 20",
         Icon::Code => "m8 7-5 5 5 5M16 7l5 5-5 5",
