@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use uuid::Uuid;
 
 /// Stroke icons drawn as inline SVG paths (24×24 box).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Hash,
     Lock,

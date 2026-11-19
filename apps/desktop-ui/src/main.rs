@@ -5,6 +5,7 @@ mod app;
 mod compose;
 mod emoji;
 mod ipc;
+mod jump;
 mod layout;
 mod markdown;
 mod messages;

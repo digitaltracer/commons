@@ -8,6 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::ipc;
+use crate::jump::{Jump, Shortcuts};
 use crate::layout::{self, Grip, Pane};
 use crate::messages::{Composer, MessageList, focus_composer};
 use crate::panels::{
@@ -20,6 +21,9 @@ use crate::spike;
 use crate::state::{Aside, Ctx, Mode, Overlay, Place, Selection, ctx, is_dm};
 use crate::switcher::{Switcher, status_label};
 use crate::ui::{self, Icon, avatar, icon, sized};
+
+/// The header's search field, which ⌘F focuses.
+const SEARCH_FIELD: &str = "hdr-search";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -219,14 +223,70 @@ pub fn App() -> impl IntoView {
             }
             return;
         }
+        // ⌥↑/⌥↓ walk the sidebar; with ⇧, only unread conversations.
+        if ev.alt_key()
+            && !ev.meta_key()
+            && !ev.ctrl_key()
+            && matches!(ev.key().as_str(), "ArrowUp" | "ArrowDown")
+            && c.overlay.get_untracked() == Overlay::None
+        {
+            let up = ev.key() == "ArrowUp";
+            let current = c.selected.get_untracked();
+            let list = if ev.shift_key() {
+                c.unread_order()
+            } else {
+                c.place
+                    .get_untracked()
+                    .and_then(|p| p.workspace_id.map(|w| c.sidebar_order(p.account_id, w)))
+                    .unwrap_or_default()
+            };
+            let at = current.and_then(|s| list.iter().position(|x| *x == s));
+            let next = match (at, up) {
+                (Some(i), true) => i.checked_sub(1),
+                (Some(i), false) => (i + 1 < list.len()).then_some(i + 1),
+                // Not in the list (it's read): unread goes to the first one either way.
+                (None, _) if ev.shift_key() => (!list.is_empty()).then_some(0),
+                (None, true) => list.len().checked_sub(1),
+                (None, false) => (!list.is_empty()).then_some(0),
+            };
+            if let Some(s) = next.and_then(|i| list.get(i)) {
+                ev.prevent_default();
+                c.open(s.account_id, s.conversation_id);
+            }
+            return;
+        }
         if !ev.meta_key() {
             return;
         }
-        let k = ev.key();
+        let k = ev.key().to_lowercase();
         if k == "k" {
+            ev.prevent_default();
+            c.overlay.update(|o| {
+                *o = if *o == Overlay::Jump {
+                    Overlay::None
+                } else {
+                    Overlay::Jump
+                }
+            });
+        } else if k == "f" && ev.shift_key() {
             ev.prevent_default();
             c.overlay.set(Overlay::None);
             c.mode.set(Mode::Search);
+        } else if k == "f" {
+            ev.prevent_default();
+            c.overlay.set(Overlay::None);
+            match document()
+                .get_element_by_id(SEARCH_FIELD)
+                .and_then(|e| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(e).ok())
+            {
+                Some(el) => {
+                    let _ = el.focus();
+                }
+                None => c.mode.set(Mode::Search),
+            }
+        } else if k == "/" {
+            ev.prevent_default();
+            c.overlay.set(Overlay::Shortcuts);
         } else if let Ok(n) = k.parse::<usize>()
             && (1..=9).contains(&n)
             && let Some((a, w)) = c.workspace_order().get(n - 1).copied()
@@ -313,6 +373,8 @@ fn overlay(o: Overlay) -> AnyView {
     match o {
         Overlay::None => ().into_any(),
         Overlay::Switcher => view! { <Switcher /> }.into_any(),
+        Overlay::Jump => view! { <Jump /> }.into_any(),
+        Overlay::Shortcuts => view! { <Shortcuts /> }.into_any(),
         Overlay::Prefs(a) => view! { <Prefs account_id=a /> }.into_any(),
         Overlay::SignInAgain(a) => view! { <SignInAgain account_id=a /> }.into_any(),
         Overlay::Invite {
@@ -534,8 +596,8 @@ fn Side() -> impl IntoView {
                             }.into_any(),
                             Some(_) => view! {
                                 <div style="padding: 0 8px">
-                                    <button class="row" class:sel=move || c.mode.get() == Mode::Search
-                                        on:click=move |_| c.mode.set(Mode::Search)>{icon(Icon::Search)}<span class="rt">"Search"</span><span class="kbd">"⌘K"</span></button>
+                                    <button class="jumpbtn" aria-haspopup="dialog" aria-keyshortcuts="Meta+K"
+                                        on:click=move |_| c.overlay.set(Overlay::Jump)>{sized(Icon::Search, 14)}<span class="rt">"Jump to…"</span><span class="kbd">"⌘K"</span></button>
                                 </div>
                                 <div class="sec">
                                     <div class="sect"><span>"Channels"</span>
@@ -734,9 +796,10 @@ fn Conversation(sel: Selection) -> impl IntoView {
                     c.mode.set(Mode::Search);
                 }>
                     {sized(Icon::Search, 14)}
-                    <input type="search" placeholder=move || format!("Search {}", ws_name()) aria-label=move || format!("Search {}", ws_name())
+                    <input type="search" id=SEARCH_FIELD aria-keyshortcuts="Meta+F"
+                        placeholder=move || format!("Search {}", ws_name()) aria-label=move || format!("Search {}", ws_name())
                         prop:value=move || query.get() on:input=move |ev| query.set(event_target_value(&ev)) />
-                    <span class="kbd">"⌘K"</span>
+                    <span class="kbd">"⌘F"</span>
                 </form>
             </header>
             <Banner account_id=sel.account_id />

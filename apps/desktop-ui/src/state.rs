@@ -50,6 +50,10 @@ pub enum Mode {
 pub enum Overlay {
     None,
     Switcher,
+    /// ⌘K: jump to a conversation or person.
+    Jump,
+    /// ⌘/: the keyboard shortcuts.
+    Shortcuts,
     Prefs(Uuid),
     NewChannel,
     Browse,
@@ -117,6 +121,8 @@ pub struct Ctx {
     pub invite_link: RwSignal<Option<String>>,
     /// Last conversation opened in each workspace.
     pub last: StoredValue<HashMap<Uuid, Uuid>>,
+    /// Conversations opened this session, newest first.
+    pub recent: StoredValue<Vec<Selection>>,
 }
 
 pub fn ctx() -> Ctx {
@@ -158,6 +164,7 @@ impl Ctx {
             notice: RwSignal::new(None),
             invite_link: RwSignal::new(None),
             last: StoredValue::new(HashMap::new()),
+            recent: StoredValue::new(vec![]),
         }
     }
 
@@ -230,12 +237,46 @@ impl Ctx {
                 l.insert(w, conversation_id);
             });
         }
+        self.recent.update_value(|r| {
+            r.retain(|x| *x != sel);
+            r.insert(0, sel);
+            r.truncate(8);
+        });
         self.place.set(Some(Place {
             account_id,
             workspace_id: ws,
         }));
         self.mode.set(Mode::Conversation);
         self.selected.set(Some(sel));
+    }
+
+    /// The current workspace's conversations in sidebar order: channels, then messages.
+    pub fn sidebar_order(&self, account_id: Uuid, workspace_id: Uuid) -> Vec<Selection> {
+        let Some(w) = self.workspace(account_id, workspace_id) else {
+            return vec![];
+        };
+        let (channels, dms): (Vec<_>, Vec<_>) =
+            w.conversations.iter().partition(|cv| !is_dm(cv.kind));
+        channels
+            .into_iter()
+            .chain(dms)
+            .map(|cv| Selection {
+                account_id,
+                conversation_id: cv.id,
+            })
+            .collect()
+    }
+
+    /// Every unread, unmuted conversation, workspace by workspace in sidebar order.
+    pub fn unread_order(&self) -> Vec<Selection> {
+        self.workspace_order()
+            .into_iter()
+            .flat_map(|(a, w)| self.sidebar_order(a, w))
+            .filter(|s| {
+                self.conversation(*s)
+                    .is_some_and(|(_, cv)| (cv.unread > 0 && !cv.muted) || cv.mentions > 0)
+            })
+            .collect()
     }
 
     /// Shows a workspace and its last open conversation (or its first).
