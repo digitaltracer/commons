@@ -47,7 +47,9 @@ fn main() -> Result<()> {
             eprintln!("  check-deps  fail if the UI crate links storage or network crates");
             eprintln!("  spike       build the app and measure the M0 webview spike");
             eprintln!("  openapi     write docs/api/openapi.json");
-            eprintln!("  release     build the signed, notarized Mac app, dmg and update files");
+            eprintln!(
+                "  release     [patch|minor|major|x.y.z] bump, then build the signed, notarized app, dmg and update files"
+            );
             std::process::exit(2);
         }
     }

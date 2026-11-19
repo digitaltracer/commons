@@ -29,17 +29,31 @@ struct Inputs {
     overlay: Option<PathBuf>,
 }
 
+const USAGE: &str = "usage: cargo xtask release [patch | minor | major | <x.y.z>] \
+                     [--config <tauri config overlay, for test builds>]";
+
 pub fn release(args: &[String]) -> Result<()> {
-    let overlay = match args {
-        [] => None,
-        [flag, path] if flag == "--config" => Some(std::fs::canonicalize(path)?),
-        _ => bail!("usage: cargo xtask release [--config <tauri config overlay, for test builds>]"),
-    };
+    let mut bump = None;
+    let mut overlay = None;
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--config" => {
+                let path = rest.next().context(USAGE)?;
+                overlay = Some(std::fs::canonicalize(path)?);
+            }
+            b if bump.is_none() && !b.starts_with('-') => bump = Some(b.to_string()),
+            _ => bail!(USAGE),
+        }
+    }
     if !cfg!(target_os = "macos") {
         bail!("cargo xtask release builds the Mac app and runs only on macOS");
     }
-    let version = desktop_version()?;
     let inputs = preflight(overlay)?;
+    if let Some(b) = bump {
+        bump_version(&b)?;
+    }
+    let version = desktop_version()?;
     println!(
         "releasing Commons {version}, signed as {:?} (team {})",
         inputs.identity, inputs.team
@@ -163,6 +177,83 @@ pub fn release(args: &[String]) -> Result<()> {
         "\nNothing was published. See docs/release.md, \"Publish\", for the GitHub release (tag v{version})."
     );
     Ok(())
+}
+
+/// Sets the app's version (`patch`, `minor`, `major` or an exact `x.y.z`, which must be
+/// higher) and commits it with `Cargo.lock`. Refuses a dirty tree, so the commit holds
+/// only the bump.
+fn bump_version(how: &str) -> Result<()> {
+    let root = root();
+    let dirty = output(
+        Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&root),
+    )?;
+    if !dirty.trim().is_empty() {
+        bail!("commit or stash your changes first: the version bump is committed on its own");
+    }
+    let current = desktop_version()?;
+    let next = next_version(&current, how)?;
+    let tags = output(
+        Command::new("git")
+            .args(["tag", "--list", &format!("v{next}")])
+            .current_dir(&root),
+    )?;
+    if !tags.trim().is_empty() {
+        bail!("tag v{next} already exists");
+    }
+    let path = root.join("apps/desktop/Cargo.toml");
+    let manifest = std::fs::read_to_string(&path)?;
+    let old = format!("version = \"{current}\"");
+    if !manifest.contains(&old) {
+        bail!("couldn't find {old} in apps/desktop/Cargo.toml");
+    }
+    std::fs::write(
+        &path,
+        manifest.replacen(&old, &format!("version = \"{next}\""), 1),
+    )?;
+    run(Command::new("cargo")
+        .args(["update", "--workspace", "--offline", "--quiet"])
+        .current_dir(&root))?;
+    run(Command::new("git")
+        .args(["add", "apps/desktop/Cargo.toml", "Cargo.lock"])
+        .current_dir(&root))?;
+    run(Command::new("git")
+        .args([
+            "commit",
+            "--quiet",
+            "-m",
+            &format!("chore(release): Commons {next}"),
+        ])
+        .current_dir(&root))?;
+    println!("bumped Commons {current} -> {next} and committed it; push it before publishing");
+    Ok(())
+}
+
+fn next_version(current: &str, how: &str) -> Result<String> {
+    let parse = |v: &str| -> Result<[u64; 3]> {
+        let parts: Vec<u64> = v
+            .split('.')
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .with_context(|| format!("{v:?} is not a version like 1.2.3"))?;
+        <[u64; 3]>::try_from(parts)
+            .map_err(|_| anyhow::anyhow!("{v:?} is not a version like 1.2.3"))
+    };
+    let [ma, mi, pa] = parse(current)?;
+    let next = match how {
+        "patch" => [ma, mi, pa + 1],
+        "minor" => [ma, mi + 1, 0],
+        "major" => [ma + 1, 0, 0],
+        exact => {
+            let v = parse(exact)?;
+            if v <= [ma, mi, pa] {
+                bail!("{exact} is not higher than the current {current}");
+            }
+            v
+        }
+    };
+    Ok(format!("{}.{}.{}", next[0], next[1], next[2]))
 }
 
 fn desktop_version() -> Result<String> {
@@ -378,4 +469,21 @@ fn verify_update(
         bail!("the update signature is not bound to version {version}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_version;
+
+    #[test]
+    fn bumps_and_exact_versions() {
+        assert_eq!(next_version("0.1.0", "patch").unwrap(), "0.1.1");
+        assert_eq!(next_version("0.1.9", "minor").unwrap(), "0.2.0");
+        assert_eq!(next_version("0.4.2", "major").unwrap(), "1.0.0");
+        assert_eq!(next_version("0.1.0", "0.3.0").unwrap(), "0.3.0");
+        assert!(next_version("0.2.0", "0.1.5").is_err(), "not higher");
+        assert!(next_version("0.2.0", "0.2.0").is_err(), "same");
+        assert!(next_version("0.2.0", "two").is_err(), "not a version");
+        assert!(next_version("0.2.0", "1.2").is_err(), "too short");
+    }
 }
