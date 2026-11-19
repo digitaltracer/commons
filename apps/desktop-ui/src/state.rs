@@ -101,6 +101,8 @@ pub struct Ctx {
     pub anchors: StoredValue<HashMap<(Uuid, Option<Uuid>), Anchor>>,
     /// The window is focused and visible.
     pub active: RwSignal<bool>,
+    /// Display names seen in member lists, by account and user.
+    pub names: RwSignal<HashMap<(Uuid, Uuid), String>>,
     /// Pane sizes, kept by the core.
     pub prefs: RwSignal<UiPrefs>,
     /// The window's inner width in CSS px.
@@ -143,6 +145,7 @@ impl Ctx {
             keyboard_open: StoredValue::new(false),
             anchors: StoredValue::new(HashMap::new()),
             active: RwSignal::new(true),
+            names: RwSignal::new(HashMap::new()),
             prefs: RwSignal::new(UiPrefs::default()),
             win_width: RwSignal::new(
                 web_sys::window()
@@ -256,6 +259,23 @@ impl Ctx {
             Some(c) => self.open(account_id, c),
             None => self.selected.set(None),
         }
+    }
+
+    /// A person's name from member lists seen so far, or "?" for their avatar.
+    pub fn name(&self, account_id: Uuid, user_id: Uuid) -> String {
+        self.names.with_untracked(|n| {
+            n.get(&(account_id, user_id))
+                .cloned()
+                .unwrap_or_else(|| "?".into())
+        })
+    }
+
+    pub fn remember_names(&self, account_id: Uuid, members: &[proto::model::Member]) {
+        self.names.update(|n| {
+            for m in members {
+                n.insert((account_id, m.user_id), m.display_name.clone());
+            }
+        });
     }
 
     /// Starts editing one of my messages in its row.

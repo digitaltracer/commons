@@ -194,6 +194,28 @@ pub fn clock(ms: i64) -> String {
     format!("{h12}:{:02} {ap}", d.get_minutes())
 }
 
+/// "10:02", for the gutter beside grouped rows.
+pub fn short_clock(ms: i64) -> String {
+    let d = date(ms);
+    let h = match d.get_hours() {
+        0 => 12,
+        h if h > 12 => h - 12,
+        h => h,
+    };
+    format!("{h}:{:02}", d.get_minutes())
+}
+
+/// "just now", "12 min ago", "3 h ago", or the day for anything older than a day.
+pub fn ago(ms: i64, now: f64) -> String {
+    let mins = ((now - ms as f64) / 60_000.0).floor().max(0.0) as i64;
+    match mins {
+        0 => "just now".into(),
+        1..=59 => format!("{mins} min ago"),
+        60..=1439 => format!("{} h ago", mins / 60),
+        _ => when(ms),
+    }
+}
+
 fn day_index(ms: i64) -> i64 {
     let d = date(ms);
     // Local midnight, in days.

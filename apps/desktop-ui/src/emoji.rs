@@ -44,6 +44,16 @@ pub fn EmojiPicker(
         )
     });
     let recent = RwSignal::new(Vec::<String>::new());
+    // Focus goes into the picker, so the keyboard can pick.
+    let panel: NodeRef<leptos::html::Div> = NodeRef::new();
+    Effect::new(move |_| {
+        if let Some(p) = panel.get()
+            && let Ok(Some(first)) = p.query_selector(".emo")
+            && let Ok(b) = wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(first)
+        {
+            let _ = b.focus();
+        }
+    });
     leptos::task::spawn_local(async move {
         if let Ok(r) =
             ipc::invoke::<Vec<String>>("recent_emoji", json!({"accountId": account_id})).await
@@ -61,7 +71,7 @@ pub fn EmojiPicker(
     };
     view! {
         <div class="backdrop" on:click=move |_| on_close.run(())></div>
-        <div class=format!("picker {placement}") style=style role="dialog" aria-label="Pick an emoji"
+        <div class=format!("picker {placement}") style=style role="dialog" aria-label="Pick an emoji" node_ref=panel
              on:keydown=move |ev: web_sys::KeyboardEvent| if ev.key() == "Escape" { ev.prevent_default(); on_close.run(()) }>
             <Show when=move || recent.with(|r| !r.is_empty())>
                 <div class="ptitle">"Recent"</div>

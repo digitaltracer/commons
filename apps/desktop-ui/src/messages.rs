@@ -75,6 +75,75 @@ fn arrivals(old: &[WindowRow], new: &[WindowRow]) -> u32 {
     }
 }
 
+/// Rows from the same author this close together share one header.
+const GROUP_MS: i64 = 5 * 60 * 1000;
+
+/// "Priya Nair: the text" for the newest message from someone else in this batch.
+fn arrival_text(old: &[WindowRow], new: &[WindowRow]) -> Option<String> {
+    let last = old.last()?;
+    let i = new.iter().position(|r| r.key == last.key)?;
+    let m = &new[i + 1..].iter().rev().find(|r| !r.message.mine)?.message;
+    let text: String = proto::markdown::plain_text(&m.body)
+        .chars()
+        .take(140)
+        .collect();
+    Some(format!("{}: {text}", m.author_name))
+}
+
+/// The top of a conversation: what it is, and for channels a way to add people.
+fn intro(account_id: Uuid, conversation_id: Uuid) -> AnyView {
+    let c = ctx();
+    let Some((w, cv)) = c.conversation(crate::state::Selection {
+        account_id,
+        conversation_id,
+    }) else {
+        return ().into_any();
+    };
+    let (icon_view, title, about, add) = match cv.kind {
+        proto::model::ConversationKind::Public => (
+            sized(Icon::Hash, 22).into_any(),
+            format!("This is the start of {}", cv.title),
+            format!("Anyone in {} can find and join this channel.", w.name),
+            true,
+        ),
+        proto::model::ConversationKind::Private => (
+            sized(Icon::Lock, 22).into_any(),
+            format!("This is the start of {}", cv.title),
+            "A private channel: only people who are added can read it.".to_string(),
+            true,
+        ),
+        proto::model::ConversationKind::Dm => (
+            avatar(
+                cv.peer_ids.first().copied().unwrap_or(cv.id),
+                &cv.title,
+                "l",
+            )
+            .into_any(),
+            format!("This is the start of your conversation with {}", cv.title),
+            "Only the two of you can read these messages.".to_string(),
+            false,
+        ),
+        proto::model::ConversationKind::GroupDm => (
+            sized(Icon::Members, 22).into_any(),
+            format!("This is the start of your conversation with {}", cv.title),
+            "Only the people in this group can read these messages.".to_string(),
+            true,
+        ),
+    };
+    view! {
+        <div class="intro">
+            <span class="introico">{icon_view}</span>
+            <h2>{title}</h2>
+            <p>{about}</p>
+            {add.then(|| view! {
+                <button class="btn ghost" on:click=move |_| c.aside.set(Aside::Members)>
+                    {sized(Icon::Members, 15)}"Add people"</button>
+            })}
+        </div>
+    }
+    .into_any()
+}
+
 fn row_el(list: &web_sys::HtmlElement, key: Uuid) -> Option<web_sys::HtmlElement> {
     list.query_selector(&format!("[data-key='{key}']"))
         .ok()
@@ -139,6 +208,10 @@ pub fn MessageList(
     let open_at_new = StoredValue::new(false);
     let away = RwSignal::new(saved.is_some());
     let arrived = RwSignal::new(0u32);
+    let roving = RwSignal::new(None::<Uuid>);
+    let last_key = Memo::new(move |_| rows.with(|r| r.last().map(|r| r.key)));
+    let announce = RwSignal::new(String::new());
+    let offset_sig = RwSignal::new(offset.get_value());
 
     let spec = move |off: u32| WindowSpec {
         account_id,
@@ -210,9 +283,15 @@ pub fn MessageList(
                         new_from.set(first_unread(&new_rows, unread_at_open));
                         open_at_new.set_value(saved.is_none());
                     }
-                } else if !pinned.get_value() {
-                    let n = rows.with_untracked(|old| arrivals(old, &new_rows));
-                    arrived.update(|a| *a += n);
+                } else {
+                    if !pinned.get_value() {
+                        let n = rows.with_untracked(|old| arrivals(old, &new_rows));
+                        arrived.update(|a| *a += n);
+                    }
+                    // Screen readers hear arrivals, not every re-render of the list.
+                    if let Some(text) = rows.with_untracked(|old| arrival_text(old, &new_rows)) {
+                        announce.set(text);
+                    }
                 }
                 let mine = new_rows
                     .iter()
@@ -285,6 +364,7 @@ pub fn MessageList(
             anchor.set_value(first);
         }
         offset.set_value(new_offset);
+        offset_sig.set(new_offset);
         ipc::command(
             "move_window",
             json!({"accountId": account_id, "subId": id, "spec": spec(new_offset)}),
@@ -302,6 +382,7 @@ pub fn MessageList(
         });
         if offset.get_value() > 0 {
             offset.set_value(0);
+            offset_sig.set(0);
             if let Some(id) = sub_id.get_value() {
                 ipc::command(
                     "move_window",
@@ -430,6 +511,7 @@ pub fn MessageList(
         let rs = rows.get();
         let new_key = new_from.get();
         let mut prev: Option<i64> = None;
+        let mut prev_row: Option<(Uuid, i64)> = None;
         let mut out = Vec::with_capacity(rs.len());
         for (i, r) in rs.into_iter().enumerate() {
             let at = r.message.created_at_ms;
@@ -445,11 +527,61 @@ pub fn MessageList(
                 _ => None,
             };
             let new_line = new_key == Some(r.key);
-            out.push((r, divider, new_line));
+            let grouped = divider.is_none()
+                && !new_line
+                && !(thread_root_id.is_some() && i == 0)
+                && prev_row
+                    .is_some_and(|(author, t)| author == r.message.author_id && at - t < GROUP_MS);
+            prev_row = Some((r.message.author_id, at));
+            out.push((r, divider, new_line, grouped));
         }
         out
     };
     let replies = move || rows.with(|r| r.len().saturating_sub(1));
+    // The intro block sits above the oldest message once the window reaches it.
+    let at_start = move || {
+        main && loaded.get() && {
+            let n = rows.with(|r| r.len() as u32);
+            n > 0 && offset_sig.get() + n >= total.get()
+        }
+    };
+    let row_keys = move |ev: web_sys::KeyboardEvent| {
+        let Some(row) = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+            .filter(|t| t.class_list().contains("msg"))
+        else {
+            return;
+        };
+        // Rows are siblings, with day and New dividers between them.
+        let is_row = |e: &web_sys::Element| e.class_list().contains("msg");
+        let walk = |mut e: Option<web_sys::Element>, back: bool| {
+            while let Some(x) = e {
+                if is_row(&x) {
+                    return Some(x);
+                }
+                e = if back {
+                    x.previous_element_sibling()
+                } else {
+                    x.next_element_sibling()
+                };
+            }
+            None
+        };
+        let parent = row.parent_element();
+        let to = match ev.key().as_str() {
+            "ArrowUp" => walk(row.previous_element_sibling(), true),
+            "ArrowDown" => walk(row.next_element_sibling(), false),
+            "Home" => walk(parent.as_ref().and_then(|p| p.first_element_child()), false),
+            "End" => walk(parent.as_ref().and_then(|p| p.last_element_child()), true),
+            _ => None,
+        };
+        if let Some(next) = to.and_then(|x| x.dyn_into::<web_sys::HtmlElement>().ok()) {
+            ev.prevent_default();
+            let _ = next.focus();
+            next.scroll_into_view_with_bool(false);
+        }
+    };
     let pill = move || {
         let n = arrived.get();
         (away.get() || n > 0).then(|| {
@@ -476,25 +608,27 @@ pub fn MessageList(
 
     view! {
         <div class="listwrap">
-            <div class="list" node_ref=scroller on:scroll=on_scroll role="log" aria-live="polite"
-                 aria-label=label aria-busy=move || (!loaded.get()).to_string() tabindex="0">
+            <div class="list" node_ref=scroller on:scroll=on_scroll role="region"
+                 aria-label=label aria-busy=move || (!loaded.get()).to_string() on:keydown=row_keys>
                 <div class="spacer"></div>
                 <div class="lin" node_ref=content>
                 {move || (!loaded.get()).then(skeleton)}
                 {move || (loaded.get() && rows.with(|r| r.is_empty())).then(|| empty(account_id, conversation_id, thread_root_id))}
-                <For each=shown key=|(r, d, n)| (r.key, r.version, d.clone(), *n) let:item>
+                {move || at_start().then(|| intro(account_id, conversation_id))}
+                <For each=shown key=|(r, d, n, g)| (r.key, r.version, d.clone(), *n, *g) let:item>
                     {item.1.map(|d| if d.is_empty() {
                         view! { <div class="tsep">{move || format!("{} {}", replies(), if replies() == 1 { "reply" } else { "replies" })}</div> }.into_any()
                     } else {
-                        view! { <div class="day" role="separator">{d}</div> }.into_any()
+                        view! { <div class="day" role="separator"><span>{d}</span></div> }.into_any()
                     })}
                     {item.2.then(|| view! { <div class="newdiv" role="separator" aria-label="New messages">"New"</div> })}
                     <Message account_id=account_id conversation_id=conversation_id row=item.0
-                             in_thread=thread_root_id.is_some() />
+                             in_thread=thread_root_id.is_some() grouped=item.3 roving=roving last_key=last_key />
                 </For>
                 </div>
             </div>
             {pill}
+            <div class="visually-hidden" aria-live="polite">{move || announce.get()}</div>
         </div>
     }
 }
@@ -503,8 +637,11 @@ pub fn MessageList(
 fn empty(account_id: Uuid, conversation_id: Uuid, thread_root_id: Option<Uuid>) -> AnyView {
     let c = ctx();
     let connection = c.connection(account_id);
-    if thread_root_id.is_some() || connection == ConnectionState::Online {
-        return view! { <p class="empty">"No messages yet."</p> }.into_any();
+    if thread_root_id.is_some() {
+        return view! { <p class="empty">"No replies yet."</p> }.into_any();
+    }
+    if connection == ConnectionState::Online {
+        return intro(account_id, conversation_id);
     }
     let title = c
         .conversation(crate::state::Selection {
@@ -535,6 +672,11 @@ fn Message(
     conversation_id: Uuid,
     row: WindowRow,
     in_thread: bool,
+    /// Same author as the row above, within five minutes: no avatar or name.
+    grouped: bool,
+    /// The list's one tab stop, moved by the arrow keys.
+    roving: RwSignal<Option<Uuid>>,
+    last_key: Memo<Option<Uuid>>,
 ) -> impl IntoView {
     let c = ctx();
     let m = row.message;
@@ -669,11 +811,22 @@ fn Message(
     let has_files = !m.attachments.is_empty();
 
     let replies = m.reply_count;
+    let last_reply = m.last_reply_at_ms;
+    let repliers = m.reply_user_ids.clone();
     let thread_summary = (!in_thread && replies > 0).then(|| {
+        let faces = repliers
+            .iter()
+            .map(|u| avatar(*u, &c.name(account_id, *u), "s"))
+            .collect_view();
+        let label = format!(
+            "{replies} {}, open thread",
+            if replies == 1 { "reply" } else { "replies" }
+        );
         view! {
-            <button class="thr" on:click=move |_| c.aside.set(Aside::Thread(id))>
+            <button class="thr" aria-label=label on:click=move |_| c.aside.set(Aside::Thread(id))>
+                <span class="faces">{faces}</span>
                 <b>{format!("{replies} {}", if replies == 1 { "reply" } else { "replies" })}</b>
-                <span>"View thread"</span>
+                {last_reply.map(|at| view! { <span>{move || format!("Last reply {}", ui::ago(at, c.now.get()))}</span> })}
             </button>
         }
     });
@@ -697,10 +850,7 @@ fn Message(
         } else if editing_me() {
             Some(view! { <InlineEdit account_id=account_id conversation_id=conversation_id in_thread=in_thread /> }.into_any())
         } else {
-            Some(
-                view! { <div class="body">{markdown::body(&src, &entities, reader, edited)}</div> }
-                    .into_any(),
-            )
+            Some(view! { <LongBody src=src.clone() entities=entities.clone() reader=reader edited=edited /> }.into_any())
         }
     };
     let confirm = RwSignal::new(None::<(f64, f64)>);
@@ -716,15 +866,31 @@ fn Message(
     } else {
         format!("{} at {}", m.author_name, ui::clock(m.created_at_ms))
     };
+    let author_id = m.author_id;
+    let open_person = move |_| {
+        c.overlay.set(crate::state::Overlay::Person {
+            account_id,
+            user_id: author_id,
+        })
+    };
+    let tab_stop = move || roving.get().or(last_key.get()) == Some(id);
 
     view! {
-        <div class=class class:pending=pending class:failed=failed data-key=id.to_string() aria-label=aria>
-            {avatar(m.author_id, &m.author_name, "")}
+        <div class=class class:cont=grouped class:pending=pending class:failed=failed data-key=id.to_string()
+            role="article" aria-label=aria tabindex=move || if tab_stop() { "0" } else { "-1" }
+            on:focus=move |_| roving.set(Some(id))>
+            {if grouped {
+                view! { <span class="gut" aria-hidden="true">{ui::short_clock(m.created_at_ms)}</span> }.into_any()
+            } else {
+                avatar(m.author_id, &m.author_name, "").into_any()
+            }}
             <div class="mc">
-                <div class="mh">
-                    <span class="name" class:dim=m.deleted on:click=move |_| c.overlay.set(crate::state::Overlay::Person { account_id, user_id: m.author_id })>{author}</span>
-                    <span class="time">{ui::clock(m.created_at_ms)}</span>
-                </div>
+                {(!grouped).then(|| view! {
+                    <div class="mh">
+                        <button class="name" class:dim=m.deleted on:click=open_person>{author}</button>
+                        <span class="time">{ui::clock(m.created_at_ms)}</span>
+                    </div>
+                })}
                 {body}
                 {m.deleted.then(|| view! { <div class="tomb">{sized(Icon::Trash, 14)}"This message was deleted."</div> })}
                 {has_files.then(|| view! { <div class="att">{attachments}</div> })}
@@ -762,6 +928,29 @@ fn Message(
                     on_close=Callback::new(move |_| confirm.set(None)) />
             })}
         </div>
+    }
+}
+
+/// A message body that collapses past about twelve lines, with Show more.
+#[component]
+fn LongBody(src: String, entities: Vec<Entity>, reader: Reader, edited: bool) -> impl IntoView {
+    let el: NodeRef<Div> = NodeRef::new();
+    let overflows = RwSignal::new(false);
+    let open = RwSignal::new(false);
+    Effect::new(move |_| {
+        if let Some(d) = el.get() {
+            ipc::next_frame(move || overflows.set(d.scroll_height() > d.client_height() + 2));
+        }
+    });
+    view! {
+        <div class="body" class:clamp=move || !open.get() class:faded=move || overflows.get() && !open.get()
+            node_ref=el>{markdown::body(&src, &entities, reader, edited)}</div>
+        {move || overflows.get().then(|| view! {
+            <button class="more" aria-expanded=move || open.get().to_string()
+                on:click=move |_| open.update(|o| *o = !*o)>
+                {move || if open.get() { "Show less" } else { "Show more" }}
+            </button>
+        })}
     }
 }
 

@@ -622,7 +622,8 @@ fn Conversation(sel: Selection) -> impl IntoView {
     let kind = untrack(move || info().map(|(_, cv)| cv.kind)).unwrap_or(ConversationKind::Public);
     let label = untrack(title);
     let short = label.trim_start_matches('#').to_string();
-    let count = RwSignal::new(None::<usize>);
+    let members = RwSignal::new(None::<Vec<proto::model::Member>>);
+    let count = move || members.with(|m| m.as_ref().map(|m| m.len()));
     let query = RwSignal::new(String::new());
     let load_count = move || {
         leptos::task::spawn_local(async move {
@@ -630,9 +631,19 @@ fn Conversation(sel: Selection) -> impl IntoView {
             if let Ok(m) =
                 ipc::invoke::<Vec<proto::model::Member>>("conversation_members", args).await
             {
-                count.set(Some(m.len()));
+                c.remember_names(sel.account_id, &m);
+                members.set(Some(m));
             }
         });
+    };
+    let faces = move || {
+        members.with(|m| {
+            m.iter()
+                .flatten()
+                .take(3)
+                .map(|p| avatar(p.user_id, &p.display_name, "s"))
+                .collect_view()
+        })
     };
     load_count();
     Effect::new(move |prev: Option<Aside>| {
@@ -645,9 +656,9 @@ fn Conversation(sel: Selection) -> impl IntoView {
     let sub = move || {
         let (_, cv) = info()?;
         Some(match cv.kind {
-            ConversationKind::Private => "Private channel".to_string(),
-            ConversationKind::Public => "Public channel".to_string(),
-            ConversationKind::GroupDm => "Group message".to_string(),
+            ConversationKind::Private | ConversationKind::Public | ConversationKind::GroupDm => {
+                String::new()
+            }
             ConversationKind::Dm => {
                 let peer = cv.peer_ids.first().copied()?;
                 if c.online(sel.account_id, peer) {
@@ -713,10 +724,10 @@ fn Conversation(sel: Selection) -> impl IntoView {
                     on:click=move |_| ipc::command("set_muted", json!({"accountId": sel.account_id,
                         "conversationId": sel.conversation_id, "muted": !muted()}))>
                     {move || if muted() { icon(Icon::BellOff).into_any() } else { icon(Icon::Bell).into_any() }}</button>
-                <button class="iconbtn wide" aria-label=move || format!("{} members", count.get().unwrap_or(0))
+                <button class="face" aria-label=move || format!("{} members", count().unwrap_or(0))
                     aria-pressed=move || (c.aside.get() == Aside::Members).to_string()
                     on:click=move |_| c.aside.update(|a| *a = if *a == Aside::Members { Aside::None } else { Aside::Members })>
-                    {icon(Icon::Members)}{move || count.get().map(|n| n.to_string())}</button>
+                    <span class="faces">{faces}</span>{move || count().map(|n| n.to_string())}</button>
                 <form class="search" role="search" on:submit=move |ev| {
                     ev.prevent_default();
                     c.query.set(query.get_untracked());
@@ -736,11 +747,12 @@ fn Conversation(sel: Selection) -> impl IntoView {
                 label=message_label.clone() placeholder=message_label />
             <div class="typing" aria-live="polite">{move || {
                 let t = c.typing.get();
-                match t.len() {
-                    0 => String::new(),
+                let text = match t.len() {
+                    0 => return None,
                     1 => format!("{} is typing…", t[0]),
                     _ => format!("{} are typing…", t.join(", ")),
-                }
+                };
+                Some(view! { <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>{text} })
             }}</div>
         </main>
     }
