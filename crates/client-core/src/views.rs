@@ -1,5 +1,5 @@
 //! Turns cached state into the view models the UI renders.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use proto::api::{SNIPPET_START, SNIPPET_STOP, SearchHit};
 use proto::model::{Conversation, ConversationKind, FileInfo, Message, Preferences};
@@ -211,8 +211,36 @@ pub fn preferences(store: &dyn Storage) -> anyhow::Result<Preferences> {
         .unwrap_or_default())
 }
 
+/// Meta key holding unsent composer text for this account.
+pub const COMPOSER_DRAFTS: &str = "composer_drafts";
+
+/// "<conversation>" for the main composer, "<conversation>/<thread root>" for a thread's.
+pub fn draft_key(conversation_id: Uuid, thread_root_id: Option<Uuid>) -> String {
+    match thread_root_id {
+        Some(t) => format!("{conversation_id}/{t}"),
+        None => conversation_id.to_string(),
+    }
+}
+
+/// Unsent composer text by [`draft_key`].
+pub fn composer_drafts(store: &dyn Storage) -> anyhow::Result<BTreeMap<String, String>> {
+    Ok(store
+        .meta(COMPOSER_DRAFTS)?
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default())
+}
+
+/// Conversations with unsent text in their own composer or one of their threads'.
+pub fn drafted(drafts: &BTreeMap<String, String>) -> std::collections::HashSet<Uuid> {
+    drafts
+        .keys()
+        .filter_map(|k| k.split('/').next()?.parse().ok())
+        .collect()
+}
+
 pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<WorkspaceView>> {
     let prefs = preferences(store)?;
+    let drafted = drafted(&composer_drafts(store)?);
     let mut pending: HashMap<Uuid, u32> = HashMap::new();
     for o in store.outbox()? {
         if matches!(o.kind, OutboxKind::Send { .. }) && o.state == OutboxState::Pending {
@@ -243,6 +271,7 @@ pub fn workspace_views(store: &dyn Storage, me: Uuid) -> anyhow::Result<Vec<Work
                 muted: prefs.muted.contains(&c.id),
                 pending: pending.get(&c.id).copied().unwrap_or(0),
                 peer_ids: c.dm_user_ids.iter().copied().filter(|u| *u != me).collect(),
+                has_draft: drafted.contains(&c.id),
             });
         }
         out.push(WorkspaceView {

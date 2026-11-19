@@ -53,6 +53,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         set_preferences,
         set_muted,
         recent_emoji,
+        composer_draft,
+        save_composer_draft,
         reconnect_now,
         sign_in_again,
         server_meta,
@@ -526,6 +528,35 @@ fn recent_emoji(host: State<'_, Host>, account_id: Uuid) -> R<Vec<String>> {
         .account(account_id)
         .map_err(err)?
         .recent_emoji()
+        .map_err(err)
+}
+
+#[tauri::command]
+fn composer_draft(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+) -> R<Option<String>> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .composer_draft(conversation_id, thread_root_id)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn save_composer_draft(
+    host: State<'_, Host>,
+    account_id: Uuid,
+    conversation_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    text: String,
+) -> R<()> {
+    host.core
+        .account(account_id)
+        .map_err(err)?
+        .set_composer_draft(conversation_id, thread_root_id, &text)
         .map_err(err)
 }
 

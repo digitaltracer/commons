@@ -59,6 +59,9 @@ pub struct ConversationView {
     /// The other people in a DM or group DM; empty for channels.
     #[serde(default)]
     pub peer_ids: Vec<Uuid>,
+    /// Unsent text waits in this conversation's composer or one of its threads'.
+    #[serde(default)]
+    pub has_draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

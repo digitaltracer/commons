@@ -110,6 +110,8 @@ pub struct Inner {
     online: Mutex<HashSet<Uuid>>,
     /// Serialises stream application so a cursor never moves backwards.
     apply_lock: Mutex<()>,
+    /// Serialises composer draft read-modify-writes.
+    drafts_lock: Mutex<()>,
     #[cfg(feature = "testing")]
     pub faults: Faults,
     /// Every workspace event this account received, for permission tests.
@@ -171,6 +173,7 @@ impl Account {
             typing: Mutex::new(HashMap::new()),
             online: Mutex::new(HashSet::new()),
             apply_lock: Mutex::new(()),
+            drafts_lock: Mutex::new(()),
             #[cfg(feature = "testing")]
             faults: Faults::default(),
             #[cfg(feature = "testing")]
@@ -1182,6 +1185,49 @@ impl Account {
         Ok(())
     }
 
+    /// Unsent text in a composer, kept on this device only.
+    pub fn composer_draft(
+        &self,
+        conversation_id: Uuid,
+        thread_root_id: Option<Uuid>,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(views::composer_drafts(&*self.store)?
+            .remove(&views::draft_key(conversation_id, thread_root_id)))
+    }
+
+    /// Saves a composer's text; blank text clears it. The sidebar hears only when a
+    /// conversation gains or loses its draft marker.
+    pub fn set_composer_draft(
+        &self,
+        conversation_id: Uuid,
+        thread_root_id: Option<Uuid>,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let _guard = self
+            .drafts_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("draft lock poisoned"))?;
+        let mut drafts = views::composer_drafts(&*self.store)?;
+        let before = views::drafted(&drafts);
+        let key = views::draft_key(conversation_id, thread_root_id);
+        let old = if text.trim().is_empty() {
+            drafts.remove(&key)
+        } else {
+            drafts.insert(key, text.to_string())
+        };
+        if old.as_deref() == Some(text) || (old.is_none() && text.trim().is_empty()) {
+            return Ok(());
+        }
+        self.store.commit(vec![Op::SetMeta(
+            views::COMPOSER_DRAFTS.into(),
+            serde_json::to_string(&drafts)?,
+        )])?;
+        if views::drafted(&drafts) != before {
+            (self.events)(self.id, AccountEvent::Sidebar);
+        }
+        Ok(())
+    }
+
     // ---- members and preferences ----
 
     /// Current members of a conversation, from the server.
@@ -1624,6 +1670,133 @@ mod tests {
             reason: NotifyReason::Mention,
             preview: "p".into(),
         }
+    }
+
+    /// An offline account over an in-memory store, counting sidebar events.
+    fn offline_account(store: Arc<dyn Storage>) -> (Account, Arc<std::sync::atomic::AtomicUsize>) {
+        let sidebar = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = sidebar.clone();
+        let acc = Account::new(
+            AccountConfig {
+                id: Uuid::from_u128(77),
+                server_url: "http://127.0.0.1:9".into(),
+                user: User {
+                    id: Uuid::from_u128(1),
+                    email: "a@example.org".into(),
+                    display_name: "A".into(),
+                },
+                data_dir: std::env::temp_dir(),
+            },
+            Arc::new(crate::transport::HttpTransport::new("http://127.0.0.1:9")),
+            store,
+            None,
+            Arc::new(crate::platform::RecordingNotifier::default()),
+            Arc::new(move |_, ev| {
+                if matches!(ev, AccountEvent::Sidebar) {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+        (acc, sidebar)
+    }
+
+    #[test]
+    fn composer_drafts_are_per_conversation_and_thread() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (acc, sidebar) = offline_account(Arc::new(SqliteStore::in_memory().unwrap()));
+        let (c1, c2, root) = (
+            Uuid::from_u128(10),
+            Uuid::from_u128(11),
+            Uuid::from_u128(12),
+        );
+        acc.set_composer_draft(c1, None, "hello").unwrap();
+        acc.set_composer_draft(c1, Some(root), "in thread").unwrap();
+        acc.set_composer_draft(c2, None, "other").unwrap();
+        assert_eq!(
+            acc.composer_draft(c1, None).unwrap().as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            acc.composer_draft(c1, Some(root)).unwrap().as_deref(),
+            Some("in thread")
+        );
+        assert_eq!(
+            acc.composer_draft(c2, None).unwrap().as_deref(),
+            Some("other")
+        );
+        assert_eq!(acc.composer_draft(c2, Some(root)).unwrap(), None);
+        // c1 gained a marker, the thread draft didn't change it, c2 gained one.
+        assert_eq!(sidebar.load(SeqCst), 2);
+
+        // Typing more keeps the marker, so the sidebar isn't rebuilt per keystroke.
+        acc.set_composer_draft(c1, None, "hello there").unwrap();
+        assert_eq!(sidebar.load(SeqCst), 2);
+
+        // Clearing the main draft keeps the marker while the thread still has text.
+        acc.set_composer_draft(c1, None, "  \n").unwrap();
+        assert_eq!(acc.composer_draft(c1, None).unwrap(), None);
+        assert_eq!(sidebar.load(SeqCst), 2);
+        acc.set_composer_draft(c1, Some(root), "").unwrap();
+        assert_eq!(sidebar.load(SeqCst), 3);
+        assert_eq!(
+            views::drafted(&views::composer_drafts(&*acc.store).unwrap()),
+            HashSet::from([c2])
+        );
+    }
+
+    #[test]
+    fn the_sidebar_marks_conversations_with_drafts() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let ws = Uuid::from_u128(9);
+        let conv = Conversation {
+            id: Uuid::from_u128(8),
+            workspace_id: ws,
+            kind: ConversationKind::Public,
+            name: Some("g".into()),
+            dm_user_ids: vec![],
+        };
+        store
+            .commit(vec![
+                Op::AddWorkspace {
+                    workspace: Workspace {
+                        id: ws,
+                        name: "w".into(),
+                    },
+                    since: 0,
+                },
+                Op::GrantAccess {
+                    conversation: conv.clone(),
+                    access_seq: 1,
+                },
+            ])
+            .unwrap();
+        let (acc, _) = offline_account(store);
+        let marked = |acc: &Account| acc.view().unwrap().workspaces[0].conversations[0].has_draft;
+        assert!(!marked(&acc));
+        acc.set_composer_draft(conv.id, Some(Uuid::from_u128(5)), "reply")
+            .unwrap();
+        assert!(marked(&acc));
+        acc.set_composer_draft(conv.id, Some(Uuid::from_u128(5)), "")
+            .unwrap();
+        assert!(!marked(&acc));
+    }
+
+    #[test]
+    fn composer_drafts_survive_a_restart() {
+        let path = std::env::temp_dir().join(format!("drafts-{}.db", Uuid::now_v7()));
+        let c = Uuid::from_u128(10);
+        {
+            let (acc, _) = offline_account(Arc::new(SqliteStore::open(&path).unwrap()));
+            acc.set_composer_draft(c, None, "kept").unwrap();
+        }
+        let (acc, _) = offline_account(Arc::new(SqliteStore::open(&path).unwrap()));
+        assert_eq!(
+            acc.composer_draft(c, None).unwrap().as_deref(),
+            Some("kept")
+        );
+        let view = acc.view().unwrap();
+        assert!(view.workspaces.is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
